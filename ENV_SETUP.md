@@ -23,9 +23,11 @@ CORS_ORIGIN=http://localhost:3000
 NICEPAY_CLIENT_KEY=R2_f931ac15a19b443282e7ea9d0263506a
 NICEPAY_SECRET_KEY=26dfd98737894b63ad2761bba56de241
 
-# 네이버페이 설정 (계정 발급 후 추가)
-# NAVERPAY_CLIENT_ID=your_naverpay_client_id
-# NAVERPAY_CLIENT_SECRET=your_naverpay_client_secret
+# 네이버페이 설정
+NAVER_PAY_CLIENT_ID=HN3GGCMDdTgGUfl0kFCo
+NAVER_PAY_CLIENT_SECRET=your_naverpay_client_secret  # 실제 시크릿 키로 변경 필요
+NAVER_PAY_CHAIN_ID=Y1dub1pDaDgyM0w
+NAVER_PAY_ENV=dev  # dev 또는 production
 
 # 카카오페이 설정 (계정 발급 후 추가)
 # KAKAOPAY_ADMIN_KEY=your_kakaopay_admin_key

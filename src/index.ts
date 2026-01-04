@@ -15,6 +15,9 @@ import travelRoutes from './routes/travel';
 import paymentRoutes from './routes/payments';
 import noticesRoutes from './routes/notices';
 import customerInquiriesRoutes from './routes/customer-inquiries';
+import contractsRoutes from './routes/contracts';
+import cashRoutes from './routes/cash';
+import mileageRoutes from './routes/mileage';
 
 // 데이터베이스 연결 테스트
 import { testConnection } from './config/database';
@@ -56,6 +59,9 @@ app.use('/', travelRoutes);
 app.use('/', paymentRoutes);
 app.use('/api', noticesRoutes);
 app.use('/api', customerInquiriesRoutes);
+app.use('/', contractsRoutes);
+app.use('/', cashRoutes);
+app.use('/', mileageRoutes);
 
 // 헬스 체크 라우트
 app.get('/api/health', (req: Request, res: Response) => {

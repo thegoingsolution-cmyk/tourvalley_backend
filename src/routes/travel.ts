@@ -3,6 +3,29 @@ import pool from '../config/database';
 
 const router = Router();
 
+// 프론트엔드 URL 추론 헬퍼 함수
+const getFrontendUrl = (): string => {
+  // 1. FRONTEND_URL 환경 변수가 있으면 사용
+  if (process.env.FRONTEND_URL) {
+    return process.env.FRONTEND_URL.replace(/\/$/, '');
+  }
+  
+  // 2. API_URL을 기반으로 추론 (https://www.bzvalley.net/api -> https://www.bzvalley.net)
+  if (process.env.API_URL) {
+    const apiUrl = process.env.API_URL.replace(/\/$/, '');
+    // /api로 끝나면 제거
+    if (apiUrl.endsWith('/api')) {
+      return apiUrl.replace(/\/api$/, '');
+    }
+    return apiUrl;
+  }
+  
+  // 3. 기본값 (프로덕션 환경에서는 https://www.bzvalley.net 사용)
+  return process.env.NODE_ENV === 'production' 
+    ? 'https://www.bzvalley.net'
+    : 'http://localhost:3000';
+};
+
 // 보험료 계산 (국내여행보험용)
 router.post('/api/travel/calculate-premium', async (req: Request, res: Response) => {
   try {
@@ -416,14 +439,15 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
       
       const [insuredResult] = await connection.execute<any>(
         `INSERT INTO insured_persons (
-          contract_id, contractor_id, is_same_as_contractor, name, resident_number, gender,
+          contract_id, contractor_id, is_same_as_contractor, name, english_name, resident_number, gender,
           health_status, has_illness_history, occupation, departure_status, sequence_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
           contractor_id,
           1, // B2C는 계약자와 동일인으로 가정
           insured.name,
+          insured.english_name || null,
           insured.resident_number || null,
           insured.gender || null,
           '좋다', // 기본값
@@ -593,6 +617,630 @@ router.get('/api/travel/exchange-rate', async (req: Request, res: Response) => {
       success: false,
       message: '환율 정보를 불러오는 중 오류가 발생했습니다.',
     });
+  }
+});
+
+// ==================== 네이버페이 결제 ====================
+
+// 네이버페이 결제 준비
+router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req: Request, res: Response) => {
+  try {
+    const { contractId } = req.params;
+    const {
+      amount,
+      productName,
+      productCount,
+      customerName,
+      customerEmail,
+      customerPhone,
+      checkOutDate, // 보험 종료일 (YYYY-MM-DD)
+    } = req.body;
+
+    console.log('네이버페이 결제 준비:', { contractId, amount, productName, checkOutDate });
+
+    // 필수 필드 검증
+    if (!amount || !productName || !checkOutDate) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 항목이 누락되었습니다.',
+      });
+    }
+
+    // 계약 정보 조회
+    const [contractRows] = await pool.execute<any[]>(
+      'SELECT * FROM travel_contracts WHERE id = ?',
+      [contractId]
+    );
+
+    if (contractRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약을 찾을 수 없습니다.',
+      });
+    }
+
+    const contract = contractRows[0];
+
+    // orderId 생성
+    const orderId = `ORDER_${Date.now()}_${contractId}`;
+    const merchantPayKey = orderId;
+
+    // useCfmYmdt 설정 (보험 종료일)
+    let useCfmYmdt: string | undefined = undefined;
+    if (checkOutDate) {
+      const checkoutDateObj = new Date(checkOutDate);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      checkoutDateObj.setHours(0, 0, 0, 0);
+      
+      if (checkoutDateObj >= today) {
+        useCfmYmdt = checkOutDate.replace(/-/g, '');
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: '보험 종료일은 오늘 이후여야 합니다.',
+        });
+      }
+    }
+
+    // 네이버페이 트랜잭션 저장
+    await pool.execute(
+      `INSERT INTO naver_pay_transactions (
+        order_id, contract_id, amount, product_name, use_cfm_ymdt, status
+      ) VALUES (?, ?, ?, ?, ?, 'ready')
+      ON DUPLICATE KEY UPDATE amount = ?, product_name = ?, use_cfm_ymdt = ?, status = 'ready'`,
+      [orderId, contractId, amount, productName, useCfmYmdt, amount, productName, useCfmYmdt]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        orderId,
+        merchantPayKey,
+        amount: Math.round(amount),
+        productName,
+        productCount: productCount || 1,
+        useCfmYmdt,
+      },
+    });
+  } catch (error) {
+    console.error('네이버페이 결제 준비 실패:', error);
+    res.status(500).json({
+      success: false,
+      message: '네이버페이 결제 준비에 실패했습니다.',
+    });
+  }
+});
+
+// 네이버페이 결제 콜백 처리
+router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response) => {
+  try {
+    const { resultCode, paymentId, resultMessage } = req.query;
+
+    console.log('네이버페이 콜백:', { resultCode, paymentId, resultMessage });
+
+    // 결제 실패 처리
+    if (resultCode === 'Fail') {
+      let errorMessage = '결제가 실패했습니다.';
+      
+      if (resultMessage === 'userCancel') {
+        errorMessage = '결제를 취소하셨습니다.';
+      } else if (resultMessage === 'OwnerAuthFail') {
+        errorMessage = '타인 명의 카드는 결제가 불가능합니다.';
+      } else if (resultMessage === 'paymentTimeExpire') {
+        errorMessage = '결제 가능한 시간이 지났습니다.';
+      }
+
+      // 네이버페이 트랜잭션 상태 업데이트 (실패)
+      try {
+        await pool.execute(
+          `UPDATE naver_pay_transactions SET status = 'failed' WHERE payment_id = ?`,
+          [paymentId || '']
+        );
+      } catch (updateError) {
+        console.error('네이버페이 트랜잭션 실패 상태 업데이트 오류:', updateError);
+      }
+
+      const frontendUrl = getFrontendUrl();
+      const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(errorMessage)}`;
+      
+      return res.redirect(failUrl);
+    }
+
+    // 결제 성공 처리
+    if (resultCode === 'Success' && paymentId) {
+      const naverPayClientId = process.env.NAVER_PAY_CLIENT_ID;
+      const naverPayClientSecret = process.env.NAVER_PAY_CLIENT_SECRET;
+      
+      if (!naverPayClientId || !naverPayClientSecret) {
+        console.error('네이버 페이 환경 변수 누락:', {
+          hasClientId: !!naverPayClientId,
+          hasClientSecret: !!naverPayClientSecret,
+        });
+        const frontendUrl = getFrontendUrl();
+        const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('네이버 페이 설정이 완료되지 않았습니다.')}`;
+        return res.redirect(failUrl);
+      }
+
+      try {
+        // 네이버 페이 결제 승인 API 호출
+        const naverPayEnv = process.env.NAVER_PAY_ENV;
+        const isDev = naverPayEnv === 'dev' || naverPayEnv === 'development';
+        const naverPayChainId = process.env.NAVER_PAY_CHAIN_ID;
+        
+        console.log('네이버 페이 환경 설정:', {
+          NAVER_PAY_ENV: naverPayEnv,
+          isDev: isDev,
+          hasClientId: !!naverPayClientId,
+          hasClientSecret: !!naverPayClientSecret,
+          hasChainId: !!naverPayChainId,
+          clientId: naverPayClientId?.substring(0, 10) + '...', // 일부만 표시
+          chainId: naverPayChainId,
+        });
+        
+        const naverPayApiUrl = isDev
+          ? 'https://dev-pay.paygate.naver.com/naverpay-partner/naverpay/payments/v2.2/apply/payment'
+          : 'https://pay.paygate.naver.com/naverpay-partner/naverpay/payments/v2.2/apply/payment';
+        
+        const idempotencyKey = `naverpay-${paymentId}-${Date.now()}`;
+        
+        console.log('네이버 페이 결제 승인 API 호출:', { 
+          url: naverPayApiUrl, 
+          paymentId,
+          environment: isDev ? 'development' : 'production',
+        });
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+        
+        const confirmResponse = await fetch(naverPayApiUrl, {
+          method: 'POST',
+          headers: {
+            'X-Naver-Client-Id': naverPayClientId,
+            'X-Naver-Client-Secret': naverPayClientSecret,
+            'X-NaverPay-Chain-Id': naverPayChainId || '',
+            'X-NaverPay-Idempotency-Key': idempotencyKey,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: `paymentId=${encodeURIComponent(paymentId as string)}`,
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+
+        const responseText = await confirmResponse.text();
+        console.log('네이버 페이 API 응답:', responseText);
+        
+        const naverPayResponse = JSON.parse(responseText);
+
+        if (!confirmResponse.ok || naverPayResponse.code === 'Fail' || naverPayResponse.error) {
+          const frontendUrl = getFrontendUrl();
+          const errorMsg = naverPayResponse.message || '결제 승인에 실패했습니다.';
+          const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(errorMsg)}`;
+          return res.redirect(failUrl);
+        }
+
+        // 결제 정보 추출
+        const detail = naverPayResponse.body?.detail || naverPayResponse.detail || {};
+        const merchantPayKey = detail.merchantPayKey || naverPayResponse.merchantPayKey;
+        const totalPayAmount = detail.totalPayAmount || naverPayResponse.totalPayAmount || 0;
+        const admissionState = detail.admissionState || naverPayResponse.admissionState || '';
+
+        if (admissionState !== 'SUCCESS') {
+          const frontendUrl = getFrontendUrl();
+          const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 승인이 완료되지 않았습니다.')}`;
+          return res.redirect(failUrl);
+        }
+
+        // orderId에서 contractId 추출
+        const contractIdMatch = merchantPayKey.match(/_(\d+)$/);
+        const contractId = contractIdMatch ? parseInt(contractIdMatch[1]) : null;
+
+        if (!contractId) {
+          const frontendUrl = getFrontendUrl();
+          const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('계약 정보를 찾을 수 없습니다.')}`;
+          return res.redirect(failUrl);
+        }
+
+        // 트랜잭션 시작
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        try {
+          // 계약 정보 조회
+          const [contractRows] = await connection.execute<any[]>(
+            'SELECT * FROM travel_contracts WHERE id = ?',
+            [contractId]
+          );
+
+          if (contractRows.length === 0) {
+            await connection.rollback();
+            const frontendUrl = getFrontendUrl();
+            const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('계약을 찾을 수 없습니다.')}`;
+            return res.redirect(failUrl);
+          }
+
+          const contract = contractRows[0];
+
+          // 계약 상태 업데이트
+          await connection.execute(
+            `UPDATE travel_contracts 
+             SET payment_status = '결제완료', payment_method = '네이버페이', updated_at = NOW()
+             WHERE id = ?`,
+            [contractId]
+          );
+
+          // 결제 정보 저장
+          await connection.execute(
+            `INSERT INTO payments (
+              contract_id, payment_method, amount, status, payment_date,
+              payment_number, pg_transaction_id, pg_response
+            ) VALUES (?, '네이버페이', ?, '완료', NOW(), ?, ?, ?)`,
+            [
+              contractId,
+              totalPayAmount,
+              merchantPayKey,
+              paymentId,
+              JSON.stringify(naverPayResponse),
+            ]
+          );
+
+          // 네이버페이 트랜잭션 상태 업데이트
+          await connection.execute(
+            `UPDATE naver_pay_transactions 
+             SET status = 'approved', payment_id = ?, pg_response = ? 
+             WHERE order_id = ?`,
+            [paymentId, JSON.stringify(naverPayResponse), merchantPayKey]
+          );
+
+          // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
+          const mileageAmount = Math.min(Math.floor(totalPayAmount * 0.03), 30000);
+          
+          if (mileageAmount > 0 && contract.member_id) {
+            await connection.execute(
+              `INSERT INTO mileage_transactions (
+                member_id, type, amount, description, reference_type, reference_id
+              ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', 'contract', ?)`,
+              [contract.member_id, mileageAmount, contractId]
+            );
+
+            await connection.execute(
+              `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
+              [mileageAmount, contract.member_id]
+            );
+          }
+
+          // TODO: 알림톡 발송 (선택사항)
+
+          await connection.commit();
+          connection.release();
+
+          // 성공 페이지로 리다이렉트
+          const frontendUrl = getFrontendUrl();
+          const successUrl = `${frontendUrl}/payment/success?contractId=${contractId}&customerName=${encodeURIComponent(contract.customer_name || '')}&contractNumber=${merchantPayKey}`;
+          res.redirect(successUrl);
+        } catch (dbError) {
+          await connection.rollback();
+          connection.release();
+          throw dbError;
+        }
+      } catch (error: any) {
+        console.error('네이버페이 승인 처리 실패:', error);
+        const frontendUrl = getFrontendUrl();
+        const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(error.message || '결제 처리 중 오류가 발생했습니다.')}`;
+        return res.redirect(failUrl);
+      }
+    } else {
+      const frontendUrl = getFrontendUrl();
+      const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 정보가 올바르지 않습니다.')}`;
+      return res.redirect(failUrl);
+    }
+  } catch (error) {
+    console.error('네이버페이 콜백 처리 실패:', error);
+    const frontendUrl = getFrontendUrl();
+    const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 처리 중 오류가 발생했습니다.')}`;
+    return res.redirect(failUrl);
+  }
+});
+
+// ==================== 카카오페이 결제 ====================
+
+// 카카오페이 결제 준비
+router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (req: Request, res: Response) => {
+  try {
+    const { contractId } = req.params;
+    const {
+      amount,
+      itemName,
+      quantity,
+      customerName,
+      customerEmail,
+      customerPhone,
+    } = req.body;
+
+    console.log('카카오페이 결제 준비:', { contractId, amount, itemName });
+
+    // 필수 필드 검증
+    if (!amount || !itemName) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 항목이 누락되었습니다.',
+      });
+    }
+
+    // 계약 정보 조회
+    const [contractRows] = await pool.execute<any[]>(
+      'SELECT * FROM travel_contracts WHERE id = ?',
+      [contractId]
+    );
+
+    if (contractRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약을 찾을 수 없습니다.',
+      });
+    }
+
+    // orderId 생성
+    const orderId = `ORDER_${Date.now()}_${contractId}`;
+
+    // 카카오페이 설정
+    const kakaoPayRestApiKey = process.env.KAKAO_PAY_REST_API_KEY;
+    const kakaoPayCid = process.env.KAKAO_PAY_CID || 'TC0ONETIME';
+    const apiBaseUrl = process.env.API_BASE_URL || 'http://localhost:4000';
+    const frontendBaseUrl = process.env.FRONTEND_BASE_URL || 'http://localhost:3000';
+
+    if (!kakaoPayRestApiKey) {
+      return res.status(500).json({
+        success: false,
+        message: '카카오페이 설정이 완료되지 않았습니다.',
+      });
+    }
+
+    try {
+      // 카카오페이 결제 준비 API 호출
+      const kakaoPayApiUrl = 'https://kapi.kakao.com/v1/payment/ready';
+      
+      const params = new URLSearchParams();
+      params.append('cid', kakaoPayCid);
+      params.append('partner_order_id', orderId);
+      params.append('partner_user_id', String(contractId));
+      params.append('item_name', itemName);
+      params.append('quantity', String(quantity || 1));
+      params.append('total_amount', String(Math.round(amount)));
+      params.append('tax_free_amount', '0');
+      params.append('approval_url', `${apiBaseUrl}/api/travel/kakao-pay-callback`);
+      params.append('cancel_url', `${frontendBaseUrl}/payment/cancel`);
+      params.append('fail_url', `${frontendBaseUrl}/payment/fail`);
+
+      const response = await fetch(kakaoPayApiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `KakaoAK ${kakaoPayRestApiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+        },
+        body: params.toString(),
+      });
+
+      const responseText = await response.text();
+      console.log('카카오페이 API 응답:', responseText);
+
+      if (!response.ok) {
+        const errorData = JSON.parse(responseText);
+        return res.status(response.status).json({
+          success: false,
+          message: errorData.msg || '카카오페이 결제 준비에 실패했습니다.',
+          error: errorData,
+        });
+      }
+
+      const kakaoPayResponse = JSON.parse(responseText);
+      const { tid, next_redirect_pc_url, next_redirect_mobile_url } = kakaoPayResponse;
+
+      // tid 저장 (나중에 승인 시 사용)
+      // 간단하게 메모리나 Redis에 저장 가능, 여기서는 DB에 임시 저장
+      await pool.execute(
+        `INSERT INTO kakao_pay_transactions (order_id, tid, contract_id, amount, status)
+         VALUES (?, ?, ?, ?, 'ready')
+         ON DUPLICATE KEY UPDATE tid = ?, amount = ?, status = 'ready'`,
+        [orderId, tid, contractId, amount, tid, amount]
+      );
+
+      res.json({
+        success: true,
+        data: {
+          tid,
+          next_redirect_pc_url,
+          next_redirect_mobile_url,
+          orderId,
+        },
+      });
+    } catch (error: any) {
+      console.error('카카오페이 결제 준비 오류:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || '카카오페이 결제 준비 중 오류가 발생했습니다.',
+      });
+    }
+  } catch (error) {
+    console.error('카카오페이 결제 준비 실패:', error);
+    res.status(500).json({
+      success: false,
+      message: '카카오페이 결제 준비에 실패했습니다.',
+    });
+  }
+});
+
+// 카카오페이 결제 승인 콜백
+router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response) => {
+  try {
+    const { pg_token, partner_order_id } = req.query;
+
+    console.log('카카오페이 콜백:', { pg_token, partner_order_id });
+
+    if (!pg_token || !partner_order_id) {
+      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 정보가 올바르지 않습니다.')}`;
+      return res.redirect(failUrl);
+    }
+
+    // tid 조회
+    const [transactionRows] = await pool.execute<any[]>(
+      'SELECT * FROM kakao_pay_transactions WHERE order_id = ? AND status = "ready"',
+      [partner_order_id]
+    );
+
+    if (transactionRows.length === 0) {
+      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 정보를 찾을 수 없습니다.')}`;
+      return res.redirect(failUrl);
+    }
+
+    const transaction = transactionRows[0];
+    const { tid, contract_id, amount } = transaction;
+
+    // 카카오페이 승인 API 호출
+    const kakaoPayRestApiKey = process.env.KAKAO_PAY_REST_API_KEY;
+    const kakaoPayCid = process.env.KAKAO_PAY_CID || 'TC0ONETIME';
+
+    if (!kakaoPayRestApiKey) {
+      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('카카오페이 설정이 완료되지 않았습니다.')}`;
+      return res.redirect(failUrl);
+    }
+
+    try {
+      const approveUrl = 'https://kapi.kakao.com/v1/payment/approve';
+      
+      const params = new URLSearchParams();
+      params.append('cid', kakaoPayCid);
+      params.append('tid', tid);
+      params.append('partner_order_id', partner_order_id as string);
+      params.append('partner_user_id', String(contract_id));
+      params.append('pg_token', pg_token as string);
+
+      const response = await fetch(approveUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `KakaoAK ${kakaoPayRestApiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+        },
+        body: params.toString(),
+      });
+
+      const responseText = await response.text();
+      console.log('카카오페이 승인 응답:', responseText);
+
+      if (!response.ok) {
+        const errorData = JSON.parse(responseText);
+        const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(errorData.msg || '결제 승인에 실패했습니다.')}`;
+        return res.redirect(failUrl);
+      }
+
+      const approveResponse = JSON.parse(responseText);
+
+      // 결제 금액 검증
+      const paidAmount = approveResponse.amount?.total || 0;
+      if (Math.abs(paidAmount - amount) > 1) {
+        console.error('결제 금액 불일치:', { expected: amount, actual: paidAmount });
+        // TODO: 결제 취소 처리
+        const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 금액이 일치하지 않습니다.')}`;
+        return res.redirect(failUrl);
+      }
+
+      // 트랜잭션 시작
+      const connection = await pool.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // 계약 정보 조회
+        const [contractRows] = await connection.execute<any[]>(
+          'SELECT * FROM travel_contracts WHERE id = ?',
+          [contract_id]
+        );
+
+        if (contractRows.length === 0) {
+          await connection.rollback();
+          const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+          const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('계약을 찾을 수 없습니다.')}`;
+          return res.redirect(failUrl);
+        }
+
+        const contract = contractRows[0];
+
+        // 계약 상태 업데이트
+        await connection.execute(
+          `UPDATE travel_contracts 
+           SET payment_status = '결제완료', payment_method = '카카오페이', updated_at = NOW()
+           WHERE id = ?`,
+          [contract_id]
+        );
+
+        // 결제 정보 저장
+        await connection.execute(
+          `INSERT INTO payments (
+            contract_id, payment_method, amount, status, payment_date,
+            payment_number, pg_transaction_id, pg_response
+          ) VALUES (?, '카카오페이', ?, '완료', NOW(), ?, ?, ?)`,
+          [
+            contract_id,
+            paidAmount,
+            partner_order_id,
+            tid,
+            JSON.stringify(approveResponse),
+          ]
+        );
+
+        // 카카오페이 트랜잭션 상태 업데이트
+        await connection.execute(
+          `UPDATE kakao_pay_transactions SET status = 'approved', pg_response = ? WHERE order_id = ?`,
+          [JSON.stringify(approveResponse), partner_order_id]
+        );
+
+        // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
+        const mileageAmount = Math.min(Math.floor(paidAmount * 0.03), 30000);
+        
+        if (mileageAmount > 0 && contract.member_id) {
+          await connection.execute(
+            `INSERT INTO mileage_transactions (
+              member_id, type, amount, description, reference_type, reference_id
+            ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', 'contract', ?)`,
+            [contract.member_id, mileageAmount, contract_id]
+          );
+
+          await connection.execute(
+            `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
+            [mileageAmount, contract.member_id]
+          );
+        }
+
+        // TODO: 알림톡 발송 (선택사항)
+
+        await connection.commit();
+        connection.release();
+
+        // 성공 페이지로 리다이렉트
+        const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const successUrl = `${frontendUrl}/payment/success?contractId=${contract_id}&customerName=${encodeURIComponent(contract.customer_name || '')}&contractNumber=${partner_order_id}`;
+        res.redirect(successUrl);
+      } catch (dbError) {
+        await connection.rollback();
+        connection.release();
+        throw dbError;
+      }
+    } catch (error: any) {
+      console.error('카카오페이 승인 처리 실패:', error);
+      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(error.message || '결제 처리 중 오류가 발생했습니다.')}`;
+      return res.redirect(failUrl);
+    }
+  } catch (error) {
+    console.error('카카오페이 콜백 처리 실패:', error);
+    const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 처리 중 오류가 발생했습니다.')}`;
+    return res.redirect(failUrl);
   }
 });
 
