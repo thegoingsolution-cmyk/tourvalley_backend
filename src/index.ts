@@ -18,6 +18,7 @@ import customerInquiriesRoutes from './routes/customer-inquiries';
 import contractsRoutes from './routes/contracts';
 import cashRoutes from './routes/cash';
 import mileageRoutes from './routes/mileage';
+import eventInsuranceRoutes from './routes/event-insurance';
 
 // 데이터베이스 연결 테스트
 import { testConnection } from './config/database';
@@ -62,6 +63,7 @@ app.use('/api', customerInquiriesRoutes);
 app.use('/', contractsRoutes);
 app.use('/', cashRoutes);
 app.use('/', mileageRoutes);
+app.use('/', eventInsuranceRoutes);
 
 // 헬스 체크 라우트
 app.get('/api/health', (req: Request, res: Response) => {
@@ -93,6 +95,9 @@ app.get('/api', (req: Request, res: Response) => {
       upload: {
         upload: 'POST /api/upload/:type',
         delete: 'DELETE /api/upload/:type/:filename',
+      },
+      eventInsurance: {
+        estimate: 'POST /api/event-insurance/estimate',
       },
     },
   });
