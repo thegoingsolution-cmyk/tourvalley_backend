@@ -1244,5 +1244,204 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
   }
 });
 
+// 단체여행보험 보험료 계산 (법인/단체용)
+router.post('/api/travel/calculate-group-premium', async (req: Request, res: Response) => {
+  try {
+    const { 
+      insurance_type,  // '국내여행보험', '해외여행보험', '해외장기체류보험'
+      insured_persons,  // 피보험자 배열 [{ age, gender, plan_type, has_medical_expense }]
+      departure_date,
+      arrival_date
+    } = req.body;
+
+    console.log('=== 단체여행보험 보험료 계산 시작 ===');
+    console.log('입력 파라미터:', {
+      insurance_type,
+      insured_persons_count: insured_persons?.length,
+      departure_date,
+      arrival_date
+    });
+
+    // 필수 파라미터 검증
+    if (!insurance_type || !insured_persons || !Array.isArray(insured_persons) || insured_persons.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    if (!departure_date || !arrival_date) {
+      return res.status(400).json({
+        success: false,
+        message: '출발일시와 도착일시가 필요합니다.',
+      });
+    }
+
+    // 보험기간 계산 (일수)
+    const departure = new Date(departure_date);
+    const arrival = new Date(arrival_date);
+    const diffTime = arrival.getTime() - departure.getTime();
+    const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+
+    if (periodDays <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: '도착일시는 출발일시보다 이후여야 합니다.',
+      });
+    }
+
+    // 각 피보험자별 보험료 계산
+    const results = [];
+    let totalPremium = 0;
+
+    for (let i = 0; i < insured_persons.length; i++) {
+      const insured = insured_persons[i];
+      const { age, gender, plan_type, has_medical_expense } = insured;
+
+      console.log(`피보험자 ${i + 1} 보험료 계산:`, { age, gender, plan_type, has_medical_expense });
+
+      // 필수 필드 검증
+      if (age === undefined || !gender || !plan_type) {
+        return res.status(400).json({
+          success: false,
+          message: `피보험자 ${i + 1}의 정보가 불완전합니다.`,
+        });
+      }
+
+      // 15세 미만일 경우 어린이플랜으로 강제 변경
+      const finalPlanType = age < 15 ? '어린이플랜' : plan_type;
+      const hasMedicalExpenseValue = has_medical_expense ? 1 : 0;
+
+      console.log('보험료 조회 조건:', {
+        insurance_type,
+        finalPlanType,
+        age,
+        gender,
+        has_medical_expense,
+        hasMedicalExpenseValue
+      });
+
+      // 보험료 조회
+      const [premiumRows] = await pool.execute<any[]>(
+        `SELECT annual_premium 
+         FROM premium_rates 
+         WHERE insurance_type = ? 
+           AND plan_type = ? 
+           AND age = ? 
+           AND gender = ? 
+           AND has_medical_expense = ? 
+           AND is_active = 1
+         ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
+         LIMIT 1`,
+        [insurance_type, finalPlanType, age, gender, hasMedicalExpenseValue]
+      );
+
+      console.log('조회된 보험료 데이터:', premiumRows);
+
+      if (!premiumRows || premiumRows.length === 0) {
+        console.log(`피보험자 ${i + 1} 보험료 정보를 찾을 수 없음`);
+        
+        // 조건을 완화하여 어떤 데이터가 있는지 확인
+        const [debugRows] = await pool.execute<any[]>(
+          `SELECT insurance_type, plan_type, age, gender, has_medical_expense, annual_premium 
+           FROM premium_rates 
+           WHERE insurance_type = ? 
+             AND is_active = 1
+           LIMIT 5`,
+          [insurance_type]
+        );
+        console.log('DB에 존재하는 보험료 샘플 데이터:', debugRows);
+        
+        return res.status(404).json({
+          success: false,
+          message: `피보험자 ${i + 1}의 보험료 정보를 찾을 수 없습니다. (보험종류: ${insurance_type}, 플랜: ${finalPlanType}, 나이: ${age}, 성별: ${gender}, 실손: ${hasMedicalExpenseValue})`,
+        });
+      }
+
+      const annualPremium = parseFloat(premiumRows[0].annual_premium);
+
+      // 단기요율 조회
+      let shortTermRate = 100.0;
+      
+      if (periodDays < 365) {
+        const [rateRows] = await pool.execute<any[]>(
+          `SELECT rate_percentage 
+           FROM short_term_rates 
+           WHERE insurance_type = ? 
+             AND period_days >= ? 
+             AND is_active = 1
+           ORDER BY period_days ASC 
+           LIMIT 1`,
+          [insurance_type, periodDays]
+        );
+
+        if (rateRows && rateRows.length > 0) {
+          shortTermRate = parseFloat(rateRows[0].rate_percentage);
+        }
+      }
+
+      // 플랜별 추가 금액 조회 (해외여행보험만 적용)
+      let additionalFee = 0;
+      if (insurance_type === '해외여행보험') {
+        const [additionalFeeRows] = await pool.execute<any[]>(
+          `SELECT additional_fee 
+           FROM plan_additional_fees 
+           WHERE insurance_type = ? 
+             AND plan_type = ? 
+             AND is_active = 1
+           ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
+           LIMIT 1`,
+          [insurance_type, finalPlanType]
+        );
+
+        if (additionalFeeRows && additionalFeeRows.length > 0) {
+          additionalFee = parseFloat(additionalFeeRows[0].additional_fee);
+        }
+      }
+
+      // 최종 보험료 계산: (연간보험료 × (단기요율 / 100)) + 플랜별 추가 금액
+      // 단수처리: 최종 보험료 십원단위 절사
+      const calculatedPremium = annualPremium * (shortTermRate / 100);
+      const finalPremium = Math.floor((calculatedPremium + additionalFee) / 10) * 10;
+
+      totalPremium += finalPremium;
+
+      results.push({
+        index: i + 1,
+        age,
+        gender,
+        plan_type: finalPlanType,
+        has_medical_expense,
+        premium: finalPremium,
+        annual_premium: annualPremium,
+        short_term_rate: shortTermRate,
+      });
+
+      console.log(`피보험자 ${i + 1} 보험료:`, {
+        annualPremium,
+        shortTermRate,
+        additionalFee,
+        finalPremium
+      });
+    }
+
+    console.log('=== 단체여행보험 보험료 계산 완료 ===');
+    console.log('총 보험료:', totalPremium);
+
+    res.json({
+      success: true,
+      total_premium: totalPremium,
+      period_days: periodDays,
+      insured_persons: results,
+    });
+  } catch (error) {
+    console.error('Calculate group premium error:', error);
+    res.status(500).json({
+      success: false,
+      message: '보험료 계산 중 오류가 발생했습니다.',
+    });
+  }
+});
+
 export default router;
 

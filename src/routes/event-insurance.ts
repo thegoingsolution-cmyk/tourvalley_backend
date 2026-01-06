@@ -123,7 +123,11 @@ router.post('/api/event-insurance/estimate', upload.fields([
     const event_location = extractEventLocation(req.body.event_name || '');
 
     // 회원 ID 처리 (있으면 회원 견적, 없으면 비회원 견적)
-    const memberId = req.body.member_id ? parseInt(req.body.member_id) : null;
+    let memberId: number | null = null;
+    if (req.body.member_id) {
+      const parsedId = parseInt(req.body.member_id);
+      memberId = isNaN(parsedId) ? null : parsedId;
+    }
 
     console.log('=== 견적 신청 데이터 확인 ===');
     console.log('회원 ID:', memberId);
@@ -222,6 +226,129 @@ router.post('/api/event-insurance/estimate', upload.fields([
     });
   } finally {
     connection.release();
+  }
+});
+
+// 행사보험 계약 목록 조회
+router.get('/api/event-contracts/list', async (req: Request, res: Response) => {
+  try {
+    const { member_id, inyear = '1', block_type = 'C', str_cur_page = '1' } = req.query;
+
+    if (!member_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'member_id가 필요합니다.',
+      });
+    }
+
+    const memberId = parseInt(member_id as string, 10);
+    const inYear = parseInt(inyear as string, 10);
+    const currentPage = parseInt(str_cur_page as string, 10);
+    const pageSize = 10; // 페이지당 항목 수
+
+    if (isNaN(memberId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 member_id입니다.',
+      });
+    }
+
+    // 날짜 범위 계산 (최근 N년)
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setFullYear(endDate.getFullYear() - inYear);
+
+    // 날짜를 MySQL DATETIME 형식으로 포맷팅 (로컬 시간 그대로 사용)
+    const formatDateForMySQL = (date: Date): string => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      const seconds = String(date.getSeconds()).padStart(2, '0');
+      return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    };
+
+    const startDateStr = formatDateForMySQL(startDate);
+    const endDateStr = formatDateForMySQL(endDate);
+
+    // 계약 목록 조회
+    const offset = (currentPage - 1) * pageSize;
+    const limitValue = parseInt(String(pageSize), 10);
+    const offsetValue = parseInt(String(offset), 10);
+    
+    const [contracts] = await pool.execute<any[]>(
+      `SELECT 
+        ec.id,
+        ec.contract_number,
+        ec.insurance_type,
+        ec.insurance_company,
+        ec.event_name,
+        ec.event_location,
+        ec.participants,
+        ec.start_date,
+        ec.end_date,
+        ec.premium,
+        ec.status,
+        ec.created_at,
+        ector.contractor
+      FROM event_contracts ec
+      LEFT JOIN event_contractors ector ON ec.id = ector.contract_id
+      WHERE ec.member_id = ? 
+        AND ec.created_at >= ? 
+        AND ec.created_at <= ?
+      GROUP BY ec.id
+      ORDER BY ec.created_at DESC
+      LIMIT ${limitValue} OFFSET ${offsetValue}`,
+      [memberId, startDateStr, endDateStr]
+    );
+
+    // 전체 개수 조회
+    const [countResult] = await pool.execute<any[]>(
+      `SELECT COUNT(DISTINCT ec.id) as total
+      FROM event_contracts ec
+      WHERE ec.member_id = ? 
+        AND ec.created_at >= ? 
+        AND ec.created_at <= ?`,
+      [memberId, startDateStr, endDateStr]
+    );
+
+    const totalCount = countResult[0]?.total || 0;
+    const totalPages = Math.ceil(totalCount / pageSize);
+
+    // 계약 데이터 포맷팅
+    const formattedContracts = contracts.map((contract: any) => ({
+      id: contract.id,
+      contractNumber: contract.contract_number || '-',
+      insuranceType: contract.insurance_type || '행사보험',
+      insuranceCompany: contract.insurance_company || '행사주최자 배상책임보험',
+      eventName: contract.event_name || '-',
+      eventLocation: contract.event_location || null,
+      participants: contract.participants || 0,
+      startDate: contract.start_date,
+      endDate: contract.end_date,
+      premium: contract.premium || 0,
+      status: contract.status || '-',
+      createdAt: contract.created_at,
+      contractor: contract.contractor || null,
+    }));
+
+    res.json({
+      success: true,
+      contracts: formattedContracts,
+      pagination: {
+        currentPage,
+        totalPages,
+        totalCount,
+        pageSize,
+      },
+    });
+  } catch (error) {
+    console.error('행사보험 계약 목록 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '행사보험 계약 목록을 불러오는 중 오류가 발생했습니다.',
+    });
   }
 });
 
