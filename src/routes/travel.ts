@@ -560,12 +560,13 @@ router.get('/api/travel/exchange-rate', async (req: Request, res: Response) => {
   try {
     const { currency = 'USD' } = req.query;
     
-    // 오늘 날짜
+    // 오늘 날짜 (한국 시간대 기준)
     const today = new Date();
-    // 하루 전날 날짜 계산
+    // 하루 전날 날짜 계산 (한국 시간대 기준)
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    // 날짜만 추출 (YYYY-MM-DD 형식, 로컬 시간 기준)
+    const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
     
     // 하루 전날 환율 조회
     const [rows] = await pool.execute<any[]>(
@@ -897,16 +898,25 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
           const mileageAmount = Math.min(Math.floor(totalPayAmount * 0.03), 30000);
           
           if (mileageAmount > 0 && contract.member_id) {
-            await connection.execute(
-              `INSERT INTO mileage_transactions (
-                member_id, type, amount, description, reference_type, reference_id
-              ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', 'contract', ?)`,
-              [contract.member_id, mileageAmount, contractId]
-            );
-
+            // members 테이블의 mileage 업데이트
             await connection.execute(
               `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
               [mileageAmount, contract.member_id]
+            );
+
+            // 업데이트 후 잔액 조회
+            const [memberResult] = await connection.execute<any[]>(
+              `SELECT mileage FROM members WHERE id = ?`,
+              [contract.member_id]
+            );
+            const newBalance = memberResult[0]?.mileage || 0;
+
+            // mileage_transactions 테이블에 저장
+            await connection.execute(
+              `INSERT INTO mileage_transactions (
+                member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
+              ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
+              [contract.member_id, mileageAmount, contractId, newBalance]
             );
           }
 
@@ -1203,16 +1213,25 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
         const mileageAmount = Math.min(Math.floor(paidAmount * 0.03), 30000);
         
         if (mileageAmount > 0 && contract.member_id) {
-          await connection.execute(
-            `INSERT INTO mileage_transactions (
-              member_id, type, amount, description, reference_type, reference_id
-            ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', 'contract', ?)`,
-            [contract.member_id, mileageAmount, contract_id]
-          );
-
+          // members 테이블의 mileage 업데이트
           await connection.execute(
             `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
             [mileageAmount, contract.member_id]
+          );
+
+          // 업데이트 후 잔액 조회
+          const [memberResult] = await connection.execute<any[]>(
+            `SELECT mileage FROM members WHERE id = ?`,
+            [contract.member_id]
+          );
+          const newBalance = memberResult[0]?.mileage || 0;
+
+          // mileage_transactions 테이블에 저장
+          await connection.execute(
+            `INSERT INTO mileage_transactions (
+              member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
+            ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
+            [contract.member_id, mileageAmount, contract_id, newBalance]
           );
         }
 

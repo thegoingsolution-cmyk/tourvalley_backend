@@ -91,8 +91,19 @@ router.get('/api/cash/list', async (req: Request, res: Response) => {
     const limitValue = parseInt(String(pageSize), 10);
     const offsetValue = parseInt(String(offset), 10);
 
-    const startDateStr = startDate.toISOString().slice(0, 19).replace('T', ' ');
-    const endDateStr = endDate.toISOString().slice(0, 19).replace('T', ' ');
+    // 날짜를 MySQL DATETIME 형식으로 포맷팅 (로컬 시간 사용, UTC 아님)
+    const formatDateForMySQL = (date: Date): string => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      const seconds = String(date.getSeconds()).padStart(2, '0');
+      return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    };
+
+    const startDateStr = formatDateForMySQL(startDate);
+    const endDateStr = formatDateForMySQL(endDate);
 
     // 무사고캐시 내역 조회
     const [cashHistory] = await pool.execute<any[]>(
@@ -120,7 +131,7 @@ router.get('/api/cash/list', async (req: Request, res: Response) => {
       WHERE member_id = ? 
         AND created_at >= ? 
         AND created_at <= ?`,
-      [memberId, startDate.toISOString().slice(0, 19).replace('T', ' '), endDate.toISOString().slice(0, 19).replace('T', ' ')]
+      [memberId, startDateStr, endDateStr]
     );
 
     const totalCount = countResult[0]?.total || 0;

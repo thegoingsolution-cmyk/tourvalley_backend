@@ -189,12 +189,19 @@ export const registerPersonalMember = async (data: PersonalMemberData): Promise<
 
     const memberId = result.insertId;
 
+    // members 테이블의 mileage 조회 (회원가입 시 1000P로 설정됨)
+    const [memberResult] = await connection.execute<any[]>(
+      `SELECT mileage FROM members WHERE id = ?`,
+      [memberId]
+    );
+    const balance = memberResult[0]?.mileage || 1000;
+
     // 마일리지 이력 추가 (회원가입 축하 1000P)
     await connection.execute(
-      `INSERT INTO mileage_history (
-        member_id, type, amount, balance, reason, reason_detail, reference_type
-      ) VALUES (?, '적립', 1000, 1000, '회원가입 축하 마일리지', '회원가입시 1000P 지급', 'signup')`,
-      [memberId]
+      `INSERT INTO mileage_transactions (
+        member_id, type, amount, balance, description, reason, reason_detail, reference_type
+      ) VALUES (?, 'earn', 1000, ?, '회원가입 축하 마일리지', '회원가입 축하 마일리지', '회원가입시 1000P 지급', 'signup')`,
+      [memberId, balance]
     );
 
     await connection.commit();
@@ -336,12 +343,19 @@ export const registerCorporateMember = async (data: CorporateMemberData): Promis
       );
     }
 
+    // members 테이블의 mileage 조회 (회원가입 시 1000P로 설정됨)
+    const [mileageResult] = await connection.execute<any[]>(
+      `SELECT mileage FROM members WHERE id = ?`,
+      [memberId]
+    );
+    const balance = mileageResult[0]?.mileage || 1000;
+
     // 마일리지 이력 추가 (회원가입 축하 1000P)
     await connection.execute(
-      `INSERT INTO mileage_history (
-        member_id, type, amount, balance, reason, reason_detail, reference_type
-      ) VALUES (?, '적립', 1000, 1000, '회원가입 축하 마일리지', '회원가입시 1000P 지급', 'signup')`,
-      [memberId]
+      `INSERT INTO mileage_transactions (
+        member_id, type, amount, balance, description, reason, reason_detail, reference_type
+      ) VALUES (?, 'earn', 1000, ?, '회원가입 축하 마일리지', '회원가입 축하 마일리지', '회원가입시 1000P 지급', 'signup')`,
+      [memberId, balance]
     );
 
     await connection.commit();
