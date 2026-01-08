@@ -66,7 +66,7 @@ router.get('/customer-inquiries/:id', async (req: Request, res: Response) => {
 
     // 질의 상세 정보 조회
     const [inquiryRows] = await pool.execute<any[]>(
-      `SELECT id, title, content, author_name, status, view_count, created_at, updated_at 
+      `SELECT id, title, content, author_name, status, is_secret, view_count, created_at, updated_at 
        FROM customer_inquiries 
        WHERE id = ? AND is_deleted = 0`,
       [inquiryId]
@@ -80,6 +80,20 @@ router.get('/customer-inquiries/:id', async (req: Request, res: Response) => {
     }
 
     const inquiry = inquiryRows[0];
+    
+    // 비밀글인 경우 본인 확인 (쿼리 파라미터로 author_name 전달)
+    const { author_name: requestAuthorName } = req.query;
+    
+    if (inquiry.is_secret === 1) {
+      // 본인이 작성한 경우 내용 표시
+      if (requestAuthorName && requestAuthorName === inquiry.author_name) {
+        // 본인이 작성한 경우 내용 그대로 표시
+      } else {
+        // 본인이 아닌 경우 내용을 숨김
+        inquiry.content = null;
+        inquiry.is_secret_required = true;
+      }
+    }
 
     // 답변 조회
     const [responseRows] = await pool.execute<any[]>(
@@ -151,6 +165,97 @@ router.post('/customer-inquiries', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: '질문 등록 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 비밀글 비밀번호 확인
+router.post('/customer-inquiries/:id/verify-password', async (req: Request, res: Response) => {
+  try {
+    const inquiryId = parseInt(req.params.id, 10);
+    const { password } = req.body;
+
+    if (isNaN(inquiryId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 질의 ID입니다.',
+      });
+    }
+
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        message: '비밀번호를 입력해주세요.',
+      });
+    }
+
+    // 질의 정보 조회 (비밀번호 포함)
+    const [inquiryRows] = await pool.execute<any[]>(
+      `SELECT id, title, content, author_name, status, is_secret, secret_password, view_count, created_at, updated_at 
+       FROM customer_inquiries 
+       WHERE id = ? AND is_deleted = 0`,
+      [inquiryId]
+    );
+
+    if (!inquiryRows || inquiryRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '질의를 찾을 수 없습니다.',
+      });
+    }
+
+    const inquiry = inquiryRows[0];
+
+    if (inquiry.is_secret !== 1) {
+      return res.status(400).json({
+        success: false,
+        message: '비밀글이 아닙니다.',
+      });
+    }
+
+    // 비밀번호 확인
+    if (!inquiry.secret_password) {
+      return res.status(400).json({
+        success: false,
+        message: '비밀번호가 설정되지 않았습니다.',
+      });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, inquiry.secret_password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: '비밀번호가 일치하지 않습니다.',
+      });
+    }
+
+    // 비밀번호가 맞으면 내용 반환
+    const { secret_password, ...inquiryWithoutPassword } = inquiry;
+    
+    // 답변 조회
+    const [responseRows] = await pool.execute<any[]>(
+      `SELECT id, content, responder_name, created_at 
+       FROM customer_inquiry_responses 
+       WHERE inquiry_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [inquiryId]
+    );
+
+    if (responseRows && responseRows.length > 0) {
+      inquiryWithoutPassword.response = responseRows[0];
+    }
+
+    res.json({
+      success: true,
+      inquiry: inquiryWithoutPassword,
+    });
+  } catch (error) {
+    console.error('Verify password error:', error);
+    res.status(500).json({
+      success: false,
+      message: '비밀번호 확인 중 오류가 발생했습니다.',
     });
   }
 });

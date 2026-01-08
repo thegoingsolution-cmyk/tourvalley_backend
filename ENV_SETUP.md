@@ -35,6 +35,21 @@ NAVER_PAY_ENV=dev  # dev 또는 production
 
 # 프론트엔드 URL
 FRONTEND_URL=http://localhost:3000
+
+# Gmail 이메일 발송 설정
+GMAIL_USER=your-email@gmail.com
+GMAIL_APP_PASSWORD=your-app-password
+```
+
+## Gmail 앱 비밀번호 설정 방법
+
+1. Google 계정 설정으로 이동: https://myaccount.google.com/
+2. 보안 탭 선택
+3. 2단계 인증이 활성화되어 있어야 합니다
+4. "앱 비밀번호" 섹션으로 이동
+5. "앱 선택"에서 "메일" 선택
+6. "기기 선택"에서 "기타(맞춤 이름)" 선택하고 "투어밸리" 입력
+7. 생성된 16자리 앱 비밀번호를 복사하여 `GMAIL_APP_PASSWORD`에 입력
 ```
 
 ## 프론트엔드 .env.local 파일 설정
