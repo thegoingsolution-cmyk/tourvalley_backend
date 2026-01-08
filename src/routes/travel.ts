@@ -994,13 +994,18 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
     // orderId 생성
     const orderId = `ORDER_${Date.now()}_${contractId}`;
 
-    // 카카오페이 설정
-    const kakaoPayRestApiKey = process.env.KAKAO_PAY_REST_API_KEY;
-    const kakaoPayCid = process.env.KAKAO_PAY_CID || 'TC0ONETIME';
-    const apiBaseUrl = process.env.API_BASE_URL || 'http://localhost:4000';
-    const frontendBaseUrl = process.env.FRONTEND_BASE_URL || 'http://localhost:3000';
+    // 카카오페이 설정 (신 카카오페이 API)
+    const kakaoPayClientId = process.env.KAKAO_PAY_CLIENT_ID;
+    const kakaoPayClientSecret = process.env.KAKAO_PAY_CLIENT_SECRET;
+    const kakaoPayEnv = process.env.KAKAO_PAY_ENV || 'dev';
+    const kakaoPaySecretKey = kakaoPayEnv === 'production' 
+      ? process.env.KAKAO_PAY_SECRET_KEY 
+      : process.env.KAKAO_PAY_SECRET_KEY_DEV;
+    const kakaoPayCid = process.env.KAKAO_PAY_CID || 'CTL803FNNQ';
+    const apiBaseUrl = process.env.FRONTEND_URL || 'http://localhost:4000';
+    const frontendBaseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
 
-    if (!kakaoPayRestApiKey) {
+    if (!kakaoPayClientId || !kakaoPayClientSecret || !kakaoPaySecretKey) {
       return res.status(500).json({
         success: false,
         message: '카카오페이 설정이 완료되지 않았습니다.',
@@ -1008,28 +1013,38 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
     }
 
     try {
-      // 카카오페이 결제 준비 API 호출
-      const kakaoPayApiUrl = 'https://kapi.kakao.com/v1/payment/ready';
+      // 카카오페이 결제 준비 API 호출 (신 카카오페이 API)
+      const kakaoPayApiUrl = 'https://open-api.kakaopay.com/online/v1/payment/ready';
       
-      const params = new URLSearchParams();
-      params.append('cid', kakaoPayCid);
-      params.append('partner_order_id', orderId);
-      params.append('partner_user_id', String(contractId));
-      params.append('item_name', itemName);
-      params.append('quantity', String(quantity || 1));
-      params.append('total_amount', String(Math.round(amount)));
-      params.append('tax_free_amount', '0');
-      params.append('approval_url', `${apiBaseUrl}/api/travel/kakao-pay-callback`);
-      params.append('cancel_url', `${frontendBaseUrl}/payment/cancel`);
-      params.append('fail_url', `${frontendBaseUrl}/payment/fail`);
+      // JSON 형식으로 요청 데이터 준비
+      const requestBody = {
+        cid: kakaoPayCid,
+        cid_secret: kakaoPayClientSecret,
+        partner_order_id: orderId,
+        partner_user_id: String(contractId),
+        item_name: itemName,
+        quantity: quantity || 1,
+        total_amount: Math.round(amount),
+        tax_free_amount: 0,
+        approval_url: `${apiBaseUrl}/api/travel/kakao-pay-callback?partner_order_id=${orderId}&partner_user_id=${contractId}`,
+        cancel_url: `${frontendBaseUrl}/payment/cancel`,
+        fail_url: `${frontendBaseUrl}/payment/fail`,
+      };
+
+      console.log('카카오페이 결제 준비 요청:', {
+        cid: kakaoPayCid,
+        orderId,
+        amount: Math.round(amount),
+        itemName,
+      });
 
       const response = await fetch(kakaoPayApiUrl, {
         method: 'POST',
         headers: {
-          'Authorization': `KakaoAK ${kakaoPayRestApiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+          'Authorization': `SECRET_KEY ${kakaoPaySecretKey}`,
+          'Content-Type': 'application/json',
         },
-        body: params.toString(),
+        body: JSON.stringify(requestBody),
       });
 
       const responseText = await response.text();
@@ -1089,7 +1104,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
     console.log('카카오페이 콜백:', { pg_token, partner_order_id });
 
     if (!pg_token || !partner_order_id) {
-      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
       const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 정보가 올바르지 않습니다.')}`;
       return res.redirect(failUrl);
     }
@@ -1101,7 +1116,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
     );
 
     if (transactionRows.length === 0) {
-      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
       const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 정보를 찾을 수 없습니다.')}`;
       return res.redirect(failUrl);
     }
@@ -1109,33 +1124,46 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
     const transaction = transactionRows[0];
     const { tid, contract_id, amount } = transaction;
 
-    // 카카오페이 승인 API 호출
-    const kakaoPayRestApiKey = process.env.KAKAO_PAY_REST_API_KEY;
-    const kakaoPayCid = process.env.KAKAO_PAY_CID || 'TC0ONETIME';
+    // 카카오페이 승인 API 호출 (신 카카오페이 API)
+    const kakaoPayClientId = process.env.KAKAO_PAY_CLIENT_ID;
+    const kakaoPayClientSecret = process.env.KAKAO_PAY_CLIENT_SECRET;
+    const kakaoPayEnv = process.env.KAKAO_PAY_ENV || 'dev';
+    const kakaoPaySecretKey = kakaoPayEnv === 'production' 
+      ? process.env.KAKAO_PAY_SECRET_KEY 
+      : process.env.KAKAO_PAY_SECRET_KEY_DEV;
+    const kakaoPayCid = process.env.KAKAO_PAY_CID || 'CTL803FNNQ';
 
-    if (!kakaoPayRestApiKey) {
-      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+    if (!kakaoPayClientId || !kakaoPayClientSecret || !kakaoPaySecretKey) {
+      const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
       const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('카카오페이 설정이 완료되지 않았습니다.')}`;
       return res.redirect(failUrl);
     }
 
     try {
-      const approveUrl = 'https://kapi.kakao.com/v1/payment/approve';
+      const approveUrl = 'https://open-api.kakaopay.com/online/v1/payment/approve';
       
-      const params = new URLSearchParams();
-      params.append('cid', kakaoPayCid);
-      params.append('tid', tid);
-      params.append('partner_order_id', partner_order_id as string);
-      params.append('partner_user_id', String(contract_id));
-      params.append('pg_token', pg_token as string);
+      // JSON 형식으로 요청 데이터 준비 (공식 문서 기준)
+      const requestBody = {
+        cid: kakaoPayCid,
+        tid: tid,
+        partner_order_id: partner_order_id as string,
+        partner_user_id: String(contract_id),
+        pg_token: pg_token as string,
+      };
+
+      console.log('카카오페이 승인 요청:', {
+        cid: kakaoPayCid,
+        tid,
+        partner_order_id,
+      });
 
       const response = await fetch(approveUrl, {
         method: 'POST',
         headers: {
-          'Authorization': `KakaoAK ${kakaoPayRestApiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+          'Authorization': `SECRET_KEY ${kakaoPaySecretKey}`,
+          'Content-Type': 'application/json',
         },
-        body: params.toString(),
+        body: JSON.stringify(requestBody),
       });
 
       const responseText = await response.text();
@@ -1143,7 +1171,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
 
       if (!response.ok) {
         const errorData = JSON.parse(responseText);
-        const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
         const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(errorData.msg || '결제 승인에 실패했습니다.')}`;
         return res.redirect(failUrl);
       }
@@ -1155,7 +1183,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
       if (Math.abs(paidAmount - amount) > 1) {
         console.error('결제 금액 불일치:', { expected: amount, actual: paidAmount });
         // TODO: 결제 취소 처리
-        const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
         const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 금액이 일치하지 않습니다.')}`;
         return res.redirect(failUrl);
       }
@@ -1173,7 +1201,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
 
         if (contractRows.length === 0) {
           await connection.rollback();
-          const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+          const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
           const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('계약을 찾을 수 없습니다.')}`;
           return res.redirect(failUrl);
         }
@@ -1241,7 +1269,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
         connection.release();
 
         // 성공 페이지로 리다이렉트
-        const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
         const successUrl = `${frontendUrl}/payment/success?contractId=${contract_id}&customerName=${encodeURIComponent(contract.customer_name || '')}&contractNumber=${partner_order_id}`;
         res.redirect(successUrl);
       } catch (dbError) {
@@ -1251,13 +1279,13 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
       }
     } catch (error: any) {
       console.error('카카오페이 승인 처리 실패:', error);
-      const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
       const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent(error.message || '결제 처리 중 오류가 발생했습니다.')}`;
       return res.redirect(failUrl);
     }
   } catch (error) {
     console.error('카카오페이 콜백 처리 실패:', error);
-    const frontendUrl = (process.env.FRONTEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
     const failUrl = `${frontendUrl}/payment/fail?error=${encodeURIComponent('결제 처리 중 오류가 발생했습니다.')}`;
     return res.redirect(failUrl);
   }
