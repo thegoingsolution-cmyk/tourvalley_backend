@@ -33,7 +33,7 @@ interface EstimateEmailData {
 }
 
 // 생년월일로 나이 계산
-const calculateAge = (birthDate: string): number => {
+export const calculateAge = (birthDate: string): number => {
   const year = parseInt(birthDate.substring(0, 4));
   const month = parseInt(birthDate.substring(4, 6));
   const day = parseInt(birthDate.substring(6, 8));
@@ -48,7 +48,7 @@ const calculateAge = (birthDate: string): number => {
 };
 
 // 보험료 계산
-const calculatePremium = async (
+export const calculatePremium = async (
   insuranceType: string,
   age: number,
   gender: string,
@@ -122,7 +122,7 @@ const calculatePremium = async (
 };
 
 // product_cd를 보험종류로 변환
-const getInsuranceType = (productCd: string): string => {
+export const getInsuranceType = (productCd: string): string => {
   // product_cd에 따라 보험종류 판단 (예: 'domestic' -> '국내여행보험')
   if (productCd.includes('domestic') || productCd.includes('국내')) {
     return '국내여행보험';
@@ -249,7 +249,7 @@ export const sendEstimateEmail = async (data: EstimateEmailData): Promise<{ succ
           <td style="position: relative; padding: 13px 0px 14px 0px; border: 0; border-bottom: solid 1px #d8d8d8; font-size: 13px; vertical-align: middle; font-family:Noto Sans KR, sans-serif,Malgun Gothic,맑은 고딕; line-height: 132%; box-sizing: border-box; text-align: center; letter-spacing: -1.2px;">${p.planType}</td>
           <td style="position: relative; padding: 13px 0px 14px 0px; border: 0; border-bottom: solid 1px #d8d8d8; font-size: 13px; vertical-align: middle; font-family:Noto Sans KR, sans-serif,Malgun Gothic,맑은 고딕; line-height: 132%; box-sizing: border-box; text-align: center; letter-spacing: -1.2px;">${formatPremium(p.premium)}</td>
         `).join('')
-        : '<td></td><td></td><td></td><td></td><td style="position: relative; padding: 13px 0px 14px 0px; border: 0; border-bottom: solid 1px #d8d8d8; font-size: 13px; vertical-align: middle; font-family:Noto Sans KR, sans-serif,Malgun Gothic,맑은 고딕; line-height: 132%; box-sizing: border-box; text-align: center; letter-spacing: -1.2px;">원</td>';
+        : '<td></td><td></td><td></td><td></td><td style="position: relative; padding: 13px 0px 14px 0px; border: 0; border-bottom: solid 1px #d8d8d8; font-size: 13px; vertical-align: middle; font-family:Noto Sans KR, sans-serif,Malgun Gothic,맑은 고딕; line-height: 132%; box-sizing: border-box; text-align: center; letter-spacing: -1.2px;"></td>';
 
       participantTableRows.push(`<tr>${firstRow}${secondRowCells}</tr>`);
     }
@@ -280,7 +280,7 @@ export const sendEstimateEmail = async (data: EstimateEmailData): Promise<{ succ
                   </a>
                 </td>
                 <td align="right" width="80%" style="padding:19px 4px 0 0;">
-                  <img src="${mailImageUrl}/images/appli_title_08.gif" border="0" alt="간편하고 똑똑한 여행자보험" width="175" height="17" loading="lazy">
+                  <img src="${mailImageUrl}/images/2023_Toptxt.png" border="0" alt="간편하고 똑똑한 여행자보험" width="175" height="17" loading="lazy">
                 </td>
               </tr>
               <tr>
@@ -498,7 +498,7 @@ export const sendEstimateEmail = async (data: EstimateEmailData): Promise<{ succ
 
     // 이메일 발송
     const mailOptions = {
-      from: `"투어밸리" <${process.env.GMAIL_USER}>`,
+      from: `"투어밸리" <tourvalley@tourvalley.net>`,
       to: data.contractorEmail,
       subject: subject,
       html: htmlContent,

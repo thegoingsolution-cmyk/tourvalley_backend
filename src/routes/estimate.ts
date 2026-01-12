@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
-import { sendEstimateEmail } from '../services/emailService';
+import { sendEstimateEmail, calculateAge, calculatePremium, getInsuranceType } from '../services/emailService';
 
 const router = Router();
 
@@ -172,6 +172,120 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       message: error instanceof Error ? error.message : '견적 신청 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 견적서 조회 API (출력용)
+router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) => {
+  try {
+    const { requestNumber } = req.params;
+
+    // 견적 신청 정보 조회
+    const [rows] = await pool.execute(
+      `SELECT * FROM estimate_requests WHERE request_number = ?`,
+      [requestNumber]
+    ) as any[];
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '견적서를 찾을 수 없습니다.',
+      });
+    }
+
+    const estimate = rows[0];
+
+    // participants JSON 파싱
+    let participants = [];
+    try {
+      if (typeof estimate.participants === 'string') {
+        participants = JSON.parse(estimate.participants);
+      } else if (Array.isArray(estimate.participants)) {
+        participants = estimate.participants;
+      }
+    } catch (e) {
+      console.error('참가자 정보 파싱 오류:', e);
+      console.error('participants 데이터:', estimate.participants);
+    }
+
+    // 참가자가 없으면 에러 반환
+    if (!participants || participants.length === 0) {
+      console.error('참가자 정보가 없습니다. estimate_id:', estimate.id);
+      return res.status(400).json({
+        success: false,
+        message: '참가자 정보가 없습니다. 견적서를 다시 신청해주세요.',
+      });
+    }
+
+    // 날짜 형식 변환 (ISO -> YYYY-MM-DD)
+    const formatDate = (dateStr: string): string => {
+      if (!dateStr) return '';
+      const date = new Date(dateStr);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    const startDate = formatDate(estimate.start_date);
+    const endDate = formatDate(estimate.end_date);
+
+    // 보험종류 결정
+    const insuranceType = getInsuranceType(estimate.product_cd);
+
+    // 피보험자별 보험료 계산
+    const participantsWithPremium = [];
+    let totalPremium = 0;
+
+    for (const participant of participants) {
+      const age = calculateAge(participant.birth_date);
+      const planType = age < 15 ? '어린이플랜' : '실속플랜';
+      const premium = await calculatePremium(
+        insuranceType,
+        age,
+        participant.gender === '남자' ? '남자' : '여자',
+        planType,
+        startDate,
+        endDate
+      );
+
+      participantsWithPremium.push({
+        ...participant,
+        age,
+        planType,
+        premium,
+      });
+
+      totalPremium += premium;
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        request_number: estimate.request_number,
+        product_cd: estimate.product_cd,
+        insurance_type: insuranceType,
+        start_date: startDate,
+        start_hour: estimate.start_hour,
+        end_date: endDate,
+        end_hour: estimate.end_hour,
+        tour_num: estimate.tour_num,
+        tour_day: estimate.tour_day,
+        contractor_name: estimate.contractor_name,
+        contractor_phone: estimate.contractor_phone,
+        contractor_email: estimate.contractor_email,
+        participants: participantsWithPremium,
+        total_premium: totalPremium,
+        created_at: estimate.created_at,
+        status: estimate.status,
+      },
+    });
+  } catch (error) {
+    console.error('견적서 조회 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : '견적서 조회 중 오류가 발생했습니다.',
     });
   }
 });
