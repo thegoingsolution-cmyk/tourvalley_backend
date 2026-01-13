@@ -7,7 +7,7 @@ import fs from 'fs';
 const router = Router();
 
 // 업로드 기본 경로 (공유 uploads 폴더)
-// dist/routes/upload.js -> dist -> b2c_bzvalley_backend -> b2c -> uploads
+// dist/routes/upload.js -> dist -> b2c_tourvalley_backend -> b2c -> uploads
 const UPLOAD_BASE_PATH = process.env.UPLOAD_PATH || path.resolve(__dirname, '../../../uploads');
 
 // 허용 파일 형식

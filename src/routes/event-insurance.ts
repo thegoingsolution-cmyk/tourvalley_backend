@@ -83,6 +83,83 @@ function extractEventLocation(eventName: string): string {
   return eventName;
 }
 
+// 숫자(만원 단위)를 어드민 형식으로 변환
+// 예: 5000 -> "5천만", 10000 -> "1억", 20000 -> "2억", 50000 -> "5억", 100000 -> "10억"
+function formatCoverageAmount(value: string | undefined): string | null {
+  if (!value || value === '0' || value === '') {
+    return null;
+  }
+  
+  const numValue = parseInt(value, 10);
+  if (isNaN(numValue) || numValue === 0) {
+    return null;
+  }
+
+  // 만원 단위 값 그대로 사용
+  const manwon = numValue;
+  
+  // 1억 이상인 경우
+  if (manwon >= 10000) {
+    const eok = manwon / 10000;
+    if (eok === Math.floor(eok)) {
+      return `${eok}억`;
+    } else {
+      // 소수점이 있는 경우 (예: 15000 -> "1억5천만")
+      const eokPart = Math.floor(eok);
+      const cheonPart = (manwon % 10000) / 1000;
+      if (cheonPart === Math.floor(cheonPart) && cheonPart > 0) {
+        return `${eokPart}억${cheonPart}천만`;
+      } else {
+        return `${manwon}만원`;
+      }
+    }
+  } 
+  // 1천만 이상인 경우
+  else if (manwon >= 1000) {
+    const cheon = manwon / 1000;
+    if (cheon === Math.floor(cheon)) {
+      return `${cheon}천만`;
+    } else {
+      return `${manwon}만원`;
+    }
+  } 
+  // 그 외
+  else {
+    return `${manwon}만원`;
+  }
+}
+
+// 참가자치료비 숫자를 어드민 형식으로 변환
+// 예: 0 -> "가입안함", 50 -> "50만", 100 -> "100만", 500 -> "500만", 1000 -> "1000만", 2000 -> "2000만", 4000 -> "4000만"
+function formatMedicalExpense(value: string | undefined): string | null {
+  if (!value || value === '0' || value === '') {
+    return '가입안함';
+  }
+  
+  const numValue = parseInt(value, 10);
+  if (isNaN(numValue) || numValue === 0) {
+    return '가입안함';
+  }
+
+  // 어드민 프론트엔드와 동일한 형식으로 저장 ("1000만", "2000만", "4000만")
+  return `${numValue}만`;
+}
+
+// 자기부담금 숫자를 어드민 형식으로 변환
+// 예: 10 -> "10만", 50 -> "50만", 100 -> "100만"
+function formatDeductible(value: string | undefined): string | null {
+  if (!value || value === '0' || value === '') {
+    return null;
+  }
+  
+  const numValue = parseInt(value, 10);
+  if (isNaN(numValue) || numValue === 0) {
+    return null;
+  }
+
+  return `${numValue}만`;
+}
+
 // 행사보험 견적 신청
 router.post('/api/event-insurance/estimate', upload.fields([
   { name: 'license', maxCount: 1 },
@@ -166,12 +243,12 @@ router.post('/api/event-insurance/estimate', upload.fields([
         fireworks,
         amusement_facilities,
         other,
-        req.body.bi_person && req.body.bi_person !== '0' ? `${req.body.bi_person}만원` : null,
-        req.body.bi_occurence && req.body.bi_occurence !== '0' ? `${req.body.bi_occurence}만원` : null,
-        req.body.pi_occurence && req.body.pi_occurence !== '0' ? `${req.body.pi_occurence}만원` : null,
-        req.body.me_person && req.body.me_person !== '0' ? `${req.body.me_person}만원` : null,
-        req.body.me_occurence && req.body.me_occurence !== '0' ? `${req.body.me_occurence}만원` : null,
-        req.body.dt_occurence && req.body.dt_occurence !== '0' ? `${req.body.dt_occurence}만원` : null,
+        formatCoverageAmount(req.body.bi_person),
+        formatCoverageAmount(req.body.bi_occurence),
+        formatCoverageAmount(req.body.pi_occurence),
+        formatMedicalExpense(req.body.me_person),
+        formatMedicalExpense(req.body.me_occurence),
+        formatDeductible(req.body.dt_occurence),
         0, // 견적 신청 시점에는 보험료 미정
         licenseFile,
         overviewFile,
