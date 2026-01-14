@@ -408,8 +408,8 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         payment?.status === '완료' ? '결제완료' : '미결제',
         contract.total_premium || 0,
         '투어밸리',
-        'PC', // B2C는 PC 또는 Mobile로 구분 가능
-        '/domestic',
+        contract.device || 'PC', // 프론트에서 전달받은 device
+        contract.access_path || '투어밸리 사이트', // 프론트에서 전달받은 access_path
         '자동입력',
       ]
     );
