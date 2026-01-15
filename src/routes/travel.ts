@@ -419,8 +419,9 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     // 2. 계약자 정보 저장
     const [contractorResult] = await connection.execute<any>(
       `INSERT INTO contractors (
-        contract_id, contractor_type, name, resident_number, mobile_phone, email
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
+        contract_id, contractor_type, name, resident_number, mobile_phone, email,
+        company_name, business_number, contact_person, phone
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         contract_id,
         contractor.contractor_type || '개인',
@@ -428,6 +429,10 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         contractor.resident_number || null,
         contractor.mobile_phone || null,
         contractor.email || null,
+        contractor.company_name || null,
+        contractor.business_number || null,
+        contractor.contact_person || null,
+        contractor.phone || null,
       ]
     );
 
@@ -1486,6 +1491,245 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
     res.status(500).json({
       success: false,
       message: '보험료 계산 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 기존 가입 이력 불러오기 - 계약 확인 및 인증번호 발송
+router.post('/api/travel/group/check-contract', async (req: Request, res: Response) => {
+  try {
+    const { business_number, company_name, mobile_phone } = req.body;
+
+    if (!business_number || !company_name || !mobile_phone) {
+      return res.status(400).json({
+        success: false,
+        message: '사업자번호, 단체명, 휴대폰번호를 모두 입력해주세요.',
+      });
+    }
+
+    const cleanBusinessNumber = business_number.replace(/-/g, '');
+    const cleanPhone = mobile_phone.replace(/-/g, '');
+
+    // 계약자 정보 확인 (법인 계약만)
+    const [contractRows] = await pool.execute<any[]>(
+      `SELECT tc.id, tc.contract_number, tc.created_at, ctr.company_name, ctr.business_number, ctr.mobile_phone
+       FROM travel_contracts tc
+       INNER JOIN contractors ctr ON tc.id = ctr.contract_id
+       WHERE ctr.contractor_type = '법인'
+         AND REPLACE(ctr.business_number, '-', '') = ?
+         AND ctr.company_name = ?
+         AND REPLACE(ctr.mobile_phone, '-', '') = ?
+       ORDER BY tc.created_at DESC
+       LIMIT 1`,
+      [cleanBusinessNumber, company_name, cleanPhone]
+    );
+
+    if (!contractRows || contractRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '일치하는 가입정보가 없습니다. 입력하신 내용을 다시 확인해주세요.',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: '계약 정보가 확인되었습니다.',
+    });
+  } catch (error) {
+    console.error('Check contract error:', error);
+    res.status(500).json({
+      success: false,
+      message: '계약 확인 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 기존 가입 이력 불러오기 - 인증번호 발송
+router.post('/api/travel/group/send-verification', async (req: Request, res: Response) => {
+  try {
+    const { sendVerificationSms } = await import('../services/aligoService');
+    const { business_number, company_name, mobile_phone } = req.body;
+
+    if (!business_number || !company_name || !mobile_phone) {
+      return res.status(400).json({
+        success: false,
+        message: '사업자번호, 단체명, 휴대폰번호를 모두 입력해주세요.',
+      });
+    }
+
+    const cleanBusinessNumber = business_number.replace(/-/g, '');
+    const cleanPhone = mobile_phone.replace(/-/g, '');
+
+    // 계약 확인
+    const [contractRows] = await pool.execute<any[]>(
+      `SELECT tc.id, ctr.company_name, ctr.business_number, ctr.mobile_phone
+       FROM travel_contracts tc
+       INNER JOIN contractors ctr ON tc.id = ctr.contract_id
+       WHERE ctr.contractor_type = '법인'
+         AND REPLACE(ctr.business_number, '-', '') = ?
+         AND ctr.company_name = ?
+         AND REPLACE(ctr.mobile_phone, '-', '') = ?
+       LIMIT 1`,
+      [cleanBusinessNumber, company_name, cleanPhone]
+    );
+
+    if (!contractRows || contractRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '일치하는 가입정보가 없습니다.',
+      });
+    }
+
+    // 인증번호 생성 및 발송
+    const { sendVerification } = await import('../services/verificationService');
+    const result = await sendVerification(cleanPhone, false);
+
+    if (result.success) {
+      res.json({
+        success: true,
+        message: '인증번호가 발송되었습니다.',
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: result.message || '인증번호 발송에 실패했습니다.',
+      });
+    }
+  } catch (error) {
+    console.error('Send verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: '인증번호 발송 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 기존 가입 이력 불러오기 - 인증번호 확인
+router.post('/api/travel/group/verify-code', async (req: Request, res: Response) => {
+  try {
+    const { mobile_phone, verification_code } = req.body;
+
+    if (!mobile_phone || !verification_code) {
+      return res.status(400).json({
+        success: false,
+        message: '휴대폰번호와 인증번호를 입력해주세요.',
+      });
+    }
+
+    const cleanPhone = mobile_phone.replace(/-/g, '');
+
+    // 인증번호 확인
+    const { verifyCode } = await import('../services/verificationService');
+    const result = await verifyCode(cleanPhone, verification_code);
+
+    if (result.success) {
+      res.json({
+        success: true,
+        message: '인증이 완료되었습니다.',
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: result.message || '인증번호가 일치하지 않습니다.',
+      });
+    }
+  } catch (error) {
+    console.error('Verify code error:', error);
+    res.status(500).json({
+      success: false,
+      message: '인증번호 확인 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 기존 가입 이력 불러오기 - 계약 목록 조회
+router.post('/api/travel/group/contract-list', async (req: Request, res: Response) => {
+  try {
+    const { business_number, company_name, mobile_phone } = req.body;
+
+    if (!business_number || !company_name || !mobile_phone) {
+      return res.status(400).json({
+        success: false,
+        message: '사업자번호, 단체명, 휴대폰번호를 모두 입력해주세요.',
+      });
+    }
+
+    const cleanBusinessNumber = business_number.replace(/-/g, '');
+    const cleanPhone = mobile_phone.replace(/-/g, '');
+
+    // 계약 목록 조회
+    const [contractRows] = await pool.execute<any[]>(
+      `SELECT 
+        tc.id,
+        tc.contract_number,
+        tc.insurance_type,
+        tc.departure_date,
+        tc.arrival_date,
+        tc.total_premium,
+        tc.created_at,
+        (SELECT COUNT(*) FROM companions WHERE contract_id = tc.id) as participant_count
+       FROM travel_contracts tc
+       INNER JOIN contractors ctr ON tc.id = ctr.contract_id
+       WHERE ctr.contractor_type = '법인'
+         AND REPLACE(ctr.business_number, '-', '') = ?
+         AND ctr.company_name = ?
+         AND REPLACE(ctr.mobile_phone, '-', '') = ?
+       ORDER BY tc.created_at DESC
+       LIMIT 10`,
+      [cleanBusinessNumber, company_name, cleanPhone]
+    );
+
+    res.json({
+      success: true,
+      contracts: contractRows || [],
+    });
+  } catch (error) {
+    console.error('Get contract list error:', error);
+    res.status(500).json({
+      success: false,
+      message: '계약 목록 조회 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 기존 가입 이력 불러오기 - 선택한 계약의 동반자 정보 조회
+router.get('/api/travel/group/contract/:contractId/companions', async (req: Request, res: Response) => {
+  try {
+    const contractId = parseInt(req.params.contractId, 10);
+
+    if (isNaN(contractId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 계약 ID입니다.',
+      });
+    }
+
+    // 동반자 정보 조회
+    const [companionRows] = await pool.execute<any[]>(
+      `SELECT 
+        name,
+        resident_number,
+        gender,
+        has_illness_history,
+        has_medical_expense,
+        plan_type,
+        premium,
+        sequence_number
+       FROM companions
+       WHERE contract_id = ?
+       ORDER BY sequence_number ASC`,
+      [contractId]
+    );
+
+    res.json({
+      success: true,
+      companions: companionRows || [],
+    });
+  } catch (error) {
+    console.error('Get companions error:', error);
+    res.status(500).json({
+      success: false,
+      message: '동반자 정보 조회 중 오류가 발생했습니다.',
     });
   }
 });
