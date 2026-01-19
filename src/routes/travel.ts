@@ -468,13 +468,18 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
       // 피보험자를 companions 테이블에도 저장 (플랜, 보험료 정보 포함)
       await connection.execute<any>(
         `INSERT INTO companions (
-          contract_id, insured_person_id, name, resident_number, gender,
+          contract_id, insured_person_id, name, english_name, nationality_type, 
+          nationality_continent, nationality_country, resident_number, gender,
           has_illness_history, has_medical_expense, plan_type, premium, sequence_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
           insured_person_id,
           insured.name,
+          insured.english_name || null,
+          insured.nationality_type || null,
+          insured.nationality_continent || null,
+          insured.nationality_country || null,
           insured.resident_number || null,
           insured.gender || null,
           0, // 과거상병 없음

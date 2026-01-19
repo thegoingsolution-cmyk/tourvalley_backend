@@ -23,7 +23,11 @@ const generateRequestNumber = async (): Promise<string> => {
 
 // 견적 신청 API
 router.post('/api/estimate/submit', async (req: Request, res: Response) => {
+  const connection = await pool.getConnection();
+  
   try {
+    await connection.beginTransaction();
+
     const {
       product_cd,
       start_date,
@@ -40,6 +44,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
 
     // 필수 필드 검증
     if (!product_cd || !start_date || !end_date || !tour_num) {
+      await connection.rollback();
       return res.status(400).json({
         success: false,
         message: '필수 정보가 누락되었습니다.',
@@ -47,6 +52,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
     }
 
     if (!contractor_name || !contractor_phone || !contractor_email) {
+      await connection.rollback();
       return res.status(400).json({
         success: false,
         message: '신청자 정보를 모두 입력해주세요.',
@@ -54,6 +60,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
     }
 
     if (!participants || !Array.isArray(participants) || participants.length === 0) {
+      await connection.rollback();
       return res.status(400).json({
         success: false,
         message: '피보험자 정보를 입력해주세요.',
@@ -63,8 +70,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
     // 견적 신청번호 생성
     const requestNumber = await generateRequestNumber();
 
-    // DB에 견적 신청 저장
-    const [result] = await pool.execute(
+    // 1. estimate_requests 테이블에 기본 정보 저장
+    const [result] = await connection.execute(
       `INSERT INTO estimate_requests (
         request_number,
         product_cd,
@@ -77,9 +84,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
-        participants,
         status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         requestNumber,
         product_cd,
@@ -92,87 +98,143 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
-        JSON.stringify(participants),
         '신청',
       ]
     ) as any[];
 
     const estimateId = (result as any).insertId;
 
-    // 이메일 발송
-    let emailSent = false;
-    let emailError = null;
+    // 2. estimate_contractors 테이블에 계약자 정보 저장
+    const [contractorResult] = await connection.execute(
+      `INSERT INTO estimate_contractors (
+        estimate_request_id,
+        contractor_type,
+        name,
+        mobile_phone,
+        email
+      ) VALUES (?, ?, ?, ?, ?)`,
+      [
+        estimateId,
+        '개인',
+        contractor_name,
+        contractor_phone,
+        contractor_email,
+      ]
+    ) as any[];
 
-    try {
-      const emailResult = await sendEstimateEmail({
-        contractorName: contractor_name,
-        contractorEmail: contractor_email,
-        productCd: product_cd,
-        startDate: start_date,
-        startHour: start_hour,
-        endDate: end_date,
-        endHour: end_hour,
-        tourNum: parseInt(tour_num),
-        participants: participants,
-        requestNumber: requestNumber,
-      });
+    const contractorId = (contractorResult as any).insertId;
 
-      emailSent = emailResult.success;
-      emailError = emailResult.success ? null : emailResult.message;
+    // 3. estimate_insured_persons 및 estimate_companions 테이블에 피보험자 정보 저장
+    // 생년월일에서 나이 계산 및 성별 추출
+    const calculateAgeFromBirthDate = (birthDate: string): number => {
+      if (!birthDate || birthDate.length !== 8) return 0;
+      const year = parseInt(birthDate.substring(0, 4));
+      const month = parseInt(birthDate.substring(4, 6));
+      const day = parseInt(birthDate.substring(6, 8));
+      const today = new Date();
+      const birth = new Date(year, month - 1, day);
+      let age = today.getFullYear() - birth.getFullYear();
+      const monthDiff = today.getMonth() - birth.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) {
+        age--;
+      }
+      return age;
+    };
 
-      // 이메일 발송 결과 업데이트
-      if (emailSent) {
-        await pool.execute(
-          `UPDATE estimate_requests 
-           SET email_sent = 1, 
-               email_sent_at = NOW(), 
-               email_error = NULL
-           WHERE id = ?`,
-          [estimateId]
-        );
-      } else {
-        await pool.execute(
-          `UPDATE estimate_requests 
-           SET email_sent = 0, 
-               email_error = ?
-           WHERE id = ?`,
-          [emailError, estimateId]
+    // 생년월일에서 주민번호 생성 (앞 6자리만, 뒷자리는 임시로 0000000)
+    const generateResidentNumber = (birthDate: string, gender: string): string => {
+      if (!birthDate || birthDate.length !== 8) return '';
+      return birthDate.substring(0, 6) + '0000000';
+    };
+
+    let totalPremium = 0;
+
+    for (let i = 0; i < participants.length; i++) {
+      const participant = participants[i];
+      const sequence = participant.sequence || (i + 1);
+      const birthDate = participant.birth_date;
+      const gender = participant.gender === '남자' ? '남자' : '여자';
+      const age = calculateAgeFromBirthDate(birthDate);
+      const residentNumber = generateResidentNumber(birthDate, gender);
+
+      // 3-1. estimate_insured_persons에 저장 (첫 번째만, 나머지는 companions로)
+      if (i === 0) {
+        await connection.execute(
+          `INSERT INTO estimate_insured_persons (
+            estimate_request_id,
+            contractor_id,
+            is_same_as_contractor,
+            name,
+            resident_number,
+            gender,
+            health_status,
+            has_illness_history,
+            sequence_number
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            estimateId,
+            contractorId,
+            0,
+            '보험대상자1',
+            residentNumber,
+            gender,
+            '좋다',
+            0,
+            sequence,
+          ]
         );
       }
-    } catch (emailErr) {
-      console.error('이메일 발송 오류:', emailErr);
-      emailError = emailErr instanceof Error ? emailErr.message : '이메일 발송 중 오류 발생';
-      
-      // 이메일 발송 실패해도 DB에는 저장됨
-      await pool.execute(
-        `UPDATE estimate_requests 
-         SET email_sent = 0, 
-             email_error = ?
-         WHERE id = ?`,
-        [emailError, estimateId]
+
+      // 3-2. estimate_companions에 저장 (모든 피보험자)
+      // 보험료는 나중에 계산하거나 0으로 설정
+      await connection.execute(
+        `INSERT INTO estimate_companions (
+          estimate_request_id,
+          name,
+          resident_number,
+          gender,
+          has_illness_history,
+          has_medical_expense,
+          plan_type,
+          premium,
+          sequence_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          estimateId,
+          `보험대상자${sequence}`,
+          residentNumber,
+          gender,
+          0,
+          0,
+          age < 15 ? '어린이플랜' : '실속플랜',
+          0,
+          sequence,
+        ]
       );
     }
 
-    // 상태를 처리중으로 업데이트
-    await pool.execute(
-      `UPDATE estimate_requests SET status = '처리중' WHERE id = ?`,
-      [estimateId]
-    );
+    await connection.commit();
+
+    // 상태를 신청으로 유지 (관리자가 견적 발송 버튼을 누를 때까지)
+    // 이메일 발송은 관리자 화면에서 "견적 발송" 버튼을 통해 처리
 
     return res.json({
       success: true,
       message: '견적 신청이 완료되었습니다.',
       data: {
         request_number: requestNumber,
-        email_sent: emailSent,
+        estimate_id: estimateId,
       },
     });
   } catch (error) {
+    await connection.rollback();
     console.error('견적 신청 오류:', error);
     return res.status(500).json({
       success: false,
       message: error instanceof Error ? error.message : '견적 신청 중 오류가 발생했습니다.',
     });
+  } finally {
+    connection.release();
   }
 });
 
@@ -196,28 +258,6 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
 
     const estimate = rows[0];
 
-    // participants JSON 파싱
-    let participants = [];
-    try {
-      if (typeof estimate.participants === 'string') {
-        participants = JSON.parse(estimate.participants);
-      } else if (Array.isArray(estimate.participants)) {
-        participants = estimate.participants;
-      }
-    } catch (e) {
-      console.error('참가자 정보 파싱 오류:', e);
-      console.error('participants 데이터:', estimate.participants);
-    }
-
-    // 참가자가 없으면 에러 반환
-    if (!participants || participants.length === 0) {
-      console.error('참가자 정보가 없습니다. estimate_id:', estimate.id);
-      return res.status(400).json({
-        success: false,
-        message: '참가자 정보가 없습니다. 견적서를 다시 신청해주세요.',
-      });
-    }
-
     // 날짜 형식 변환 (ISO -> YYYY-MM-DD)
     const formatDate = (dateStr: string): string => {
       if (!dateStr) return '';
@@ -234,30 +274,105 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
     // 보험종류 결정
     const insuranceType = getInsuranceType(estimate.product_cd);
 
-    // 피보험자별 보험료 계산
-    const participantsWithPremium = [];
+    // 참가자 정보 조회 (새 테이블 구조 우선, 없으면 기존 participants JSON 사용)
+    let participants = [];
     let totalPremium = 0;
 
-    for (const participant of participants) {
-      const age = calculateAge(participant.birth_date);
-      const planType = age < 15 ? '어린이플랜' : '실속플랜';
-      const premium = await calculatePremium(
-        insuranceType,
-        age,
-        participant.gender === '남자' ? '남자' : '여자',
-        planType,
-        startDate,
-        endDate
-      );
+    // estimate_companions 테이블에서 조회 시도
+    const [companionRows] = await pool.execute(
+      `SELECT * FROM estimate_companions 
+       WHERE estimate_request_id = ? 
+       ORDER BY sequence_number ASC`,
+      [estimate.id]
+    ) as any[];
 
-      participantsWithPremium.push({
-        ...participant,
-        age,
-        planType,
-        premium,
-      });
+    if (companionRows && companionRows.length > 0) {
+      // 새 테이블 구조 사용
+      for (const companion of companionRows) {
+        // 주민번호에서 생년월일 추출 (앞 6자리: YYMMDD)
+        let birthDate = '';
+        if (companion.resident_number && companion.resident_number.length >= 6) {
+          const yy = companion.resident_number.substring(0, 2);
+          const mm = companion.resident_number.substring(2, 4);
+          const dd = companion.resident_number.substring(4, 6);
+          // 1900년대 또는 2000년대 판단 (간단히 50 이상이면 1900년대)
+          const yearPrefix = parseInt(yy) >= 50 ? '19' : '20';
+          birthDate = `${yearPrefix}${yy}${mm}${dd}`;
+        }
 
-      totalPremium += premium;
+        const age = birthDate ? calculateAge(birthDate) : 0;
+        const planType = companion.plan_type || (age < 15 ? '어린이플랜' : '실속플랜');
+        
+        // 보험료가 0이면 계산
+        let premium = parseFloat(companion.premium) || 0;
+        if (premium === 0 && birthDate) {
+          premium = await calculatePremium(
+            insuranceType,
+            age,
+            companion.gender || '남자',
+            planType,
+            startDate,
+            endDate
+          );
+        }
+
+        participants.push({
+          sequence: companion.sequence_number,
+          gender: companion.gender || '남자',
+          birth_date: birthDate,
+          age,
+          planType,
+          premium,
+        });
+
+        totalPremium += premium;
+      }
+    } else {
+      // 기존 participants JSON 사용 (호환성)
+      try {
+        if (typeof estimate.participants === 'string') {
+          participants = JSON.parse(estimate.participants);
+        } else if (Array.isArray(estimate.participants)) {
+          participants = estimate.participants;
+        }
+      } catch (e) {
+        console.error('참가자 정보 파싱 오류:', e);
+        console.error('participants 데이터:', estimate.participants);
+      }
+
+      // 참가자가 없으면 에러 반환
+      if (!participants || participants.length === 0) {
+        console.error('참가자 정보가 없습니다. estimate_id:', estimate.id);
+        return res.status(400).json({
+          success: false,
+          message: '참가자 정보가 없습니다. 견적서를 다시 신청해주세요.',
+        });
+      }
+
+      // 피보험자별 보험료 계산
+      const participantsWithPremium = [];
+      for (const participant of participants) {
+        const age = calculateAge(participant.birth_date);
+        const planType = age < 15 ? '어린이플랜' : '실속플랜';
+        const premium = await calculatePremium(
+          insuranceType,
+          age,
+          participant.gender === '남자' ? '남자' : '여자',
+          planType,
+          startDate,
+          endDate
+        );
+
+        participantsWithPremium.push({
+          ...participant,
+          age,
+          planType,
+          premium,
+        });
+
+        totalPremium += premium;
+      }
+      participants = participantsWithPremium;
     }
 
     return res.json({
@@ -275,7 +390,7 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
         contractor_name: estimate.contractor_name,
         contractor_phone: estimate.contractor_phone,
         contractor_email: estimate.contractor_email,
-        participants: participantsWithPremium,
+        participants: participants,
         total_premium: totalPremium,
         created_at: estimate.created_at,
         status: estimate.status,
