@@ -540,6 +540,36 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
       }
     }
 
+    // 5. 마일리지 적립 (결제 완료인 경우)
+    if (payment?.status === '완료' && contract.member_id) {
+      const paymentAmount = payment.amount || contract.total_premium || 0;
+      // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
+      const mileageAmount = Math.min(Math.floor(paymentAmount * 0.03), 30000);
+      
+      if (mileageAmount > 0) {
+        // members 테이블의 mileage 업데이트
+        await connection.execute(
+          `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
+          [mileageAmount, contract.member_id]
+        );
+
+        // 업데이트 후 잔액 조회
+        const [memberResult] = await connection.execute<any[]>(
+          `SELECT mileage FROM members WHERE id = ?`,
+          [contract.member_id]
+        );
+        const newBalance = memberResult[0]?.mileage || 0;
+
+        // mileage_transactions 테이블에 저장
+        await connection.execute(
+          `INSERT INTO mileage_transactions (
+            member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
+          ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
+          [contract.member_id, mileageAmount, contract_id, newBalance]
+        );
+      }
+    }
+
     await connection.commit();
 
     res.json({
