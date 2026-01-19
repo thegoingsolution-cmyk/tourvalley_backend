@@ -141,10 +141,38 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       return age;
     };
 
-    // 생년월일에서 주민번호 생성 (앞 6자리만, 뒷자리는 임시로 0000000)
+    // 생년월일에서 주민번호 생성 (YYMMDD-GNNNNNN 형식)
+    // 생년월일: YYYYMMDD (예: 19931208)
+    // 주민번호: YYMMDD-GNNNNNN (예: 931208-1000000)
     const generateResidentNumber = (birthDate: string, gender: string): string => {
       if (!birthDate || birthDate.length !== 8) return '';
-      return birthDate.substring(0, 6) + '0000000';
+      
+      // YYYYMMDD에서 YYMMDD 추출 (연도 뒷 2자리만 사용)
+      const year = birthDate.substring(0, 4);
+      const month = birthDate.substring(4, 6);
+      const day = birthDate.substring(6, 8);
+      const yy = year.substring(2, 4); // 연도 뒷 2자리
+      
+      // 성별 코드 결정 (남자: 1 또는 3, 여자: 2 또는 4)
+      // 2000년대생 여부에 따라 다르지만, 일단 기본값으로 설정
+      // 1900년대생: 남자 1, 여자 2
+      // 2000년대생: 남자 3, 여자 4
+      let genderCode = '1'; // 기본값: 남자 (1900년대)
+      if (gender === '여자') {
+        genderCode = '2'; // 여자 (1900년대)
+      }
+      
+      // 연도 앞자리가 20이면 2000년대생
+      if (year.startsWith('20')) {
+        if (gender === '남자') {
+          genderCode = '3'; // 남자 (2000년대)
+        } else {
+          genderCode = '4'; // 여자 (2000년대)
+        }
+      }
+      
+      // YYMMDD + G + 000000 (총 13자리)
+      return `${yy}${month}${day}${genderCode}000000`;
     };
 
     let totalPremium = 0;
