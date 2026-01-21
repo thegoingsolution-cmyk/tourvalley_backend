@@ -98,7 +98,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
-        '신청',
+        '견적신청',
       ]
     ) as any[];
 
