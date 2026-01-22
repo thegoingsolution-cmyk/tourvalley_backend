@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import axios from 'axios';
 import crypto from 'crypto';
+import { sendSms } from '../services/aligoService';
 
 const router = Router();
 
@@ -70,6 +71,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
       authResultCode,
       authResultMsg,
       mallReserved,
+      payMethod, // 결제 방법 (card, vbank 등)
     } = req.body;
 
     console.log('파싱된 요청 데이터:', {
@@ -102,9 +104,15 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
     console.log('Basic Auth 생성 완료');
 
     // 나이스페이 승인 API 호출 (실제 결제 처리)
+    // 가상계좌인 경우 payMethod를 포함
+    const approveData: any = { amount: parseInt(amount) };
+    if (payMethod === 'vbank' || payMethod === 'VBANK') {
+      approveData.payMethod = 'VBANK';
+    }
+
     const approveResponse = await axios.post(
       `https://api.nicepay.co.kr/v1/payments/${tid}`,
-      { amount: parseInt(amount) },
+      approveData,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -115,81 +123,173 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
 
     console.log('나이스페이 승인 API 응답:', approveResponse.data);
     const nicepayResponse = { data: approveResponse.data };
+    const responsePayMethod = approveResponse.data.payMethod || payMethod || 'card';
 
     if (approveResponse.data.resultCode === '0000') {
-      console.log('✅ 나이스페이 실제 결제 승인 성공!');
-      // 결제 성공
-      const [paymentResult] = await connection.execute<any>(
-        `INSERT INTO payments (
-          contract_id, payment_method, amount, status, payment_date,
-          payment_number, pg_transaction_id, pg_response
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          contract_id,
-          '나이스페이먼츠',
-          amount,
-          '완료',
-          new Date(),
-          orderId,
-          tid,
-          JSON.stringify(nicepayResponse.data),
-        ]
-      );
-
-      const payment_id = paymentResult.insertId;
-
-      // 계약 상태 업데이트
-      await connection.execute(
-        `UPDATE travel_contracts 
-         SET payment_status = '결제완료', payment_method = '나이스페이먼츠'
-         WHERE id = ?`,
-        [contract_id]
-      );
-
-      // 계약 정보 조회 (member_id 확인)
-      const [contractRows] = await connection.execute<any[]>(
-        'SELECT member_id FROM travel_contracts WHERE id = ?',
-        [contract_id]
-      );
-      const contract = contractRows[0];
-
-      // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
-      const mileageAmount = Math.min(Math.floor(parseInt(amount) * 0.03), 30000);
+      // 가상계좌인지 확인
+      const isVirtualAccount = responsePayMethod === 'VBANK' || responsePayMethod === 'vbank';
       
-      if (mileageAmount > 0 && contract?.member_id) {
-        // members 테이블의 mileage 업데이트
-        await connection.execute(
-          `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
-          [mileageAmount, contract.member_id]
+      if (isVirtualAccount) {
+        console.log('✅ 나이스페이 가상계좌 발급 성공!');
+        
+        // 가상계좌 정보 추출
+        const vbank = approveResponse.data.vbank || {};
+        const accountNumber = vbank.accountNumber || vbank.account || '';
+        const bankName = vbank.bankName || vbank.bank || '';
+        const accountHolderName = vbank.accountHolderName || vbank.accountHolder || '';
+        const expireDate = vbank.expireDate || vbank.expDate || '';
+
+        if (!accountNumber || !bankName) {
+          throw new Error('가상계좌 정보를 받지 못했습니다.');
+        }
+
+        // 가상계좌 결제 정보 저장 (상태: 대기)
+        const [paymentResult] = await connection.execute<any>(
+          `INSERT INTO payments (
+            contract_id, payment_method, payment_sub_method, amount, status,
+            payment_number, pg_transaction_id, pg_response, bank_name, account_number
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            contract_id,
+            '기타결제',
+            '가상계좌',
+            amount,
+            '대기',
+            orderId,
+            tid,
+            JSON.stringify(nicepayResponse.data),
+            bankName,
+            accountNumber,
+          ]
         );
 
-        // 업데이트 후 잔액 조회
-        const [memberResult] = await connection.execute<any[]>(
-          `SELECT mileage FROM members WHERE id = ?`,
-          [contract.member_id]
-        );
-        const newBalance = memberResult[0]?.mileage || 0;
+        const payment_id = paymentResult.insertId;
 
-        // mileage_transactions 테이블에 저장
-        await connection.execute(
-          `INSERT INTO mileage_transactions (
-            member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
-          ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
-          [contract.member_id, mileageAmount, contract_id, newBalance]
+        // 계약 정보 조회 (고객 전화번호 확인)
+        const [contractRows] = await connection.execute<any[]>(
+          `SELECT tc.*, c.phone, c.email, c.name as contractor_name
+           FROM travel_contracts tc
+           LEFT JOIN contractors c ON tc.id = c.contract_id
+           WHERE tc.id = ? LIMIT 1`,
+          [contract_id]
         );
+        const contract = contractRows[0];
+
+        // SMS 발송
+        if (contract?.phone) {
+          const smsMessage = `[투어밸리] 여행보험료 입금 안내
+
+은행: ${bankName}
+계좌번호: ${accountNumber}
+예금주: ${accountHolderName}
+입금금액: ${parseInt(amount).toLocaleString()}원
+
+위 계좌로 입금해주시기 바랍니다.`;
+          
+          try {
+            // 알리고 SMS 발송
+            await sendSms({
+              receiver: contract.phone,
+              message: smsMessage,
+              title: '[투어밸리] 여행보험료 입금 안내',
+            });
+            console.log('SMS 발송 성공');
+          } catch (smsError) {
+            console.error('SMS 발송 실패:', smsError);
+            // SMS 발송 실패해도 가상계좌 발급은 성공으로 처리
+          }
+        }
+
+        await connection.commit();
+
+        console.log('DB에 가상계좌 정보 저장 완료, payment_id:', payment_id);
+        
+        res.json({
+          success: true,
+          payment_id,
+          payment_number: orderId,
+          accountNumber,
+          bankName,
+          accountHolderName,
+          expireDate,
+          message: '가상계좌가 발급되었습니다. 계좌번호는 문자로 발송됩니다.',
+          data: nicepayResponse.data,
+        });
+      } else {
+        console.log('✅ 나이스페이 실제 결제 승인 성공!');
+        // 신용카드 결제 성공
+        const [paymentResult] = await connection.execute<any>(
+          `INSERT INTO payments (
+            contract_id, payment_method, amount, status, payment_date,
+            payment_number, pg_transaction_id, pg_response
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            contract_id,
+            '나이스페이먼츠',
+            amount,
+            '완료',
+            new Date(),
+            orderId,
+            tid,
+            JSON.stringify(nicepayResponse.data),
+          ]
+        );
+
+        const payment_id = paymentResult.insertId;
+
+        // 계약 상태 업데이트
+        await connection.execute(
+          `UPDATE travel_contracts 
+           SET payment_status = '결제완료', payment_method = '나이스페이먼츠'
+           WHERE id = ?`,
+          [contract_id]
+        );
+
+        // 계약 정보 조회 (member_id 확인)
+        const [contractRows] = await connection.execute<any[]>(
+          'SELECT member_id FROM travel_contracts WHERE id = ?',
+          [contract_id]
+        );
+        const contract = contractRows[0];
+
+        // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
+        const mileageAmount = Math.min(Math.floor(parseInt(amount) * 0.03), 30000);
+        
+        if (mileageAmount > 0 && contract?.member_id) {
+          // members 테이블의 mileage 업데이트
+          await connection.execute(
+            `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
+            [mileageAmount, contract.member_id]
+          );
+
+          // 업데이트 후 잔액 조회
+          const [memberResult] = await connection.execute<any[]>(
+            `SELECT mileage FROM members WHERE id = ?`,
+            [contract.member_id]
+          );
+          const newBalance = memberResult[0]?.mileage || 0;
+
+          // mileage_transactions 테이블에 저장
+          await connection.execute(
+            `INSERT INTO mileage_transactions (
+              member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
+            ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
+            [contract.member_id, mileageAmount, contract_id, newBalance]
+          );
+        }
+
+        await connection.commit();
+
+        console.log('DB에 결제 정보 저장 완료, payment_id:', payment_id);
+        
+        res.json({
+          success: true,
+          payment_id,
+          payment_number: orderId,
+          message: '결제가 완료되었습니다.',
+          data: nicepayResponse.data,
+        });
       }
-
-      await connection.commit();
-
-      console.log('DB에 결제 정보 저장 완료, payment_id:', payment_id);
-      
-      res.json({
-        success: true,
-        payment_id,
-        payment_number: orderId,
-        message: '결제가 완료되었습니다.',
-        data: nicepayResponse.data,
-      });
     } else {
       // 결제 실패
       console.error('❌ 나이스페이 결제 승인 실패:', nicepayResponse.data);
@@ -420,6 +520,296 @@ router.get('/api/payments/nicepay/callback', async (req: Request, res: Response)
     console.error('나이스페이 콜백 처리 오류:', error);
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.redirect(302, `${frontendUrl}/payment/complete?error=callback_failed`);
+  }
+});
+
+// 나이스페이 가상계좌 발급
+router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: Response) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+
+    const {
+      contract_id,
+      amount,
+      buyerName,
+      buyerEmail,
+      buyerTel,
+      bankCode, // 은행 코드 (003, 004, 011 등)
+    } = req.body;
+
+    if (!contract_id || !amount || !bankCode) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    console.log('===== 나이스페이 가상계좌 발급 시작 =====');
+    console.log('요청 데이터:', { contract_id, amount, buyerName, buyerEmail, buyerTel, bankCode });
+
+    const clientKey = process.env.NICEPAY_CLIENT_KEY || '';
+    const secretKey = process.env.NICEPAY_SECRET_KEY || '';
+    
+    // 주문번호 생성
+    const orderId = `VA${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+    
+    // 나이스페이 가상계좌 발급 API 호출
+    const authHeader = Buffer.from(`${clientKey}:${secretKey}`).toString('base64');
+
+    // 만료일시 계산 (7일 후, YYMMDDHHMMSS 형식)
+    const expireDate = new Date(Date.now() + 168 * 60 * 60 * 1000);
+    const year = expireDate.getFullYear().toString().slice(-2);
+    const month = (expireDate.getMonth() + 1).toString().padStart(2, '0');
+    const day = expireDate.getDate().toString().padStart(2, '0');
+    const hours = expireDate.getHours().toString().padStart(2, '0');
+    const minutes = expireDate.getMinutes().toString().padStart(2, '0');
+    const seconds = expireDate.getSeconds().toString().padStart(2, '0');
+    const vbankExpDate = `${year}${month}${day}${hours}${minutes}${seconds}`;
+
+    // 웹훅 URL 설정 (가상계좌 입금 통지용)
+    const notifyUrl = `${process.env.BACKEND_URL || 'http://localhost:4000'}/api/payments/nicepay/virtual-account/notify`;
+
+    // 가상계좌 발급 요청 (한 번에 처리)
+    const virtualAccountData = {
+      orderId,
+      amount: parseInt(amount),
+      goodsName: '여행보험료',
+      buyerName: buyerName || '',
+      buyerEmail: buyerEmail || '',
+      buyerTel: buyerTel || '',
+      payMethod: 'VBANK',
+      bankCode, // 은행 코드
+      vbankExpDate, // 7일 후 (YYMMDDHHMMSS 형식)
+      notifyUrl, // 웹훅 URL (가상계좌 입금 통지용)
+    };
+
+    console.log('나이스페이 가상계좌 발급 API 호출:', virtualAccountData);
+
+    const nicepayResponse = await axios.post(
+      'https://api.nicepay.co.kr/v1/payments',
+      virtualAccountData,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Basic ${authHeader}`,
+        },
+      }
+    );
+
+    console.log('나이스페이 가상계좌 발급 응답:', nicepayResponse.data);
+
+    if (nicepayResponse.data.resultCode === '0000') {
+      // 가상계좌 정보는 vbank 객체 안에 있음
+      const vbank = nicepayResponse.data.vbank || {};
+      const accountNumber = vbank.accountNumber || vbank.account || '';
+      const bankName = vbank.bankName || vbank.bank || '';
+      const accountHolderName = vbank.accountHolderName || vbank.accountHolder || '';
+      const expireDate = vbank.expireDate || vbank.expDate || '';
+
+      if (!accountNumber || !bankName) {
+        throw new Error('가상계좌 정보를 받지 못했습니다.');
+      }
+
+      const tid = nicepayResponse.data.tid || '';
+      
+      // 결제 정보 저장 (상태: 대기)
+      const [paymentResult] = await connection.execute<any>(
+        `INSERT INTO payments (
+          contract_id, payment_method, payment_sub_method, amount, status,
+          payment_number, pg_transaction_id, pg_response, bank_name, account_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          contract_id,
+          '기타결제',
+          '가상계좌',
+          amount,
+          '대기',
+          orderId,
+          tid,
+          JSON.stringify(nicepayResponse.data),
+          bankName,
+          accountNumber,
+        ]
+      );
+
+      const payment_id = paymentResult.insertId;
+
+      // 계약 정보 조회 (고객 전화번호 확인)
+      const [contractRows] = await connection.execute<any[]>(
+        `SELECT tc.*, c.phone, c.email, c.name as contractor_name
+         FROM travel_contracts tc
+         LEFT JOIN contractors c ON tc.id = c.contract_id
+         WHERE tc.id = ? LIMIT 1`,
+        [contract_id]
+      );
+      const contract = contractRows[0];
+
+      // SMS 발송
+      if (contract?.phone) {
+        const smsMessage = `[투어밸리] 여행보험료 입금 안내
+
+은행: ${bankName}
+계좌번호: ${accountNumber}
+예금주: ${accountHolderName}
+입금금액: ${parseInt(amount).toLocaleString()}원
+
+위 계좌로 입금해주시기 바랍니다.`;
+        
+        try {
+          // 알리고 SMS 발송
+          await sendSms({
+            receiver: contract.phone,
+            message: smsMessage,
+            title: '[투어밸리] 여행보험료 입금 안내',
+          });
+          console.log('SMS 발송 성공');
+        } catch (smsError) {
+          console.error('SMS 발송 실패:', smsError);
+          // SMS 발송 실패해도 가상계좌 발급은 성공으로 처리
+        }
+      }
+
+      await connection.commit();
+
+      res.json({
+        success: true,
+        payment_id,
+        orderId,
+        accountNumber,
+        bankName,
+        accountHolderName,
+        expireDate,
+        message: '가상계좌가 발급되었습니다. 계좌번호는 문자로 발송됩니다.',
+        data: nicepayResponse.data,
+      });
+    } else {
+      await connection.rollback();
+      res.status(400).json({
+        success: false,
+        message: nicepayResponse.data.resultMsg || '가상계좌 발급에 실패했습니다.',
+        data: nicepayResponse.data,
+      });
+    }
+  } catch (error: any) {
+    await connection.rollback();
+    console.error('나이스페이 가상계좌 발급 오류:', error);
+    
+    if (error.response) {
+      console.error('나이스페이 API 에러 응답:', error.response.data);
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: '가상계좌 발급 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// 나이스페이 가상계좌 입금 통지 (웹훅)
+router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request, res: Response) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    console.log('===== 나이스페이 가상계좌 입금 통지 =====');
+    console.log('받은 데이터:', req.body);
+
+    const { orderId, tid, status, accountNumber, bankName, amount, mallReserved } = req.body;
+
+    // 웹훅 등록 테스트 요청인지 확인 (mallReserved에 테스트 메시지가 있는 경우)
+    const isTestRequest = mallReserved && (
+      mallReserved.includes('TEST') || 
+      mallReserved.includes('테스트') ||
+      mallReserved.includes('웹훅 등록')
+    );
+
+    if (isTestRequest) {
+      console.log('웹훅 등록 테스트 요청입니다. 200 응답 및 OK 문자열 반환');
+      return res.status(200).setHeader('Content-Type', 'text/plain').send('OK');
+    }
+
+    // 결제 정보 조회
+    const [paymentRows] = await connection.execute<any[]>(
+      'SELECT * FROM payments WHERE payment_number = ?',
+      [orderId]
+    );
+
+    if (!paymentRows || paymentRows.length === 0) {
+      console.error('결제 정보를 찾을 수 없습니다:', orderId);
+      // 웹훅 등록 테스트가 아닌 경우에도 200 반환 (Nicepay 요구사항)
+      return res.status(200).json({ success: false, message: '결제 정보를 찾을 수 없습니다.' });
+    }
+
+    const payment = paymentRows[0];
+
+    if (status === 'PAID' || status === '입금완료') {
+      await connection.beginTransaction();
+
+      // 결제 상태 업데이트
+      await connection.execute(
+        `UPDATE payments 
+         SET status = '완료', payment_date = NOW(), pg_response = JSON_MERGE_PATCH(COALESCE(pg_response, '{}'), ?)
+         WHERE id = ?`,
+        [JSON.stringify(req.body), payment.id]
+      );
+
+      // 계약 상태 업데이트
+      await connection.execute(
+        `UPDATE travel_contracts 
+         SET payment_status = '결제완료', payment_method = '기타결제'
+         WHERE id = ?`,
+        [payment.contract_id]
+      );
+
+      // 계약 정보 조회 (member_id 확인)
+      const [contractRows] = await connection.execute<any[]>(
+        'SELECT member_id FROM travel_contracts WHERE id = ?',
+        [payment.contract_id]
+      );
+      const contract = contractRows[0];
+
+      // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
+      const mileageAmount = Math.min(Math.floor(parseInt(amount) * 0.03), 30000);
+      
+      if (mileageAmount > 0 && contract?.member_id) {
+        await connection.execute(
+          `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
+          [mileageAmount, contract.member_id]
+        );
+
+        const [memberResult] = await connection.execute<any[]>(
+          `SELECT mileage FROM members WHERE id = ?`,
+          [contract.member_id]
+        );
+        const newBalance = memberResult[0]?.mileage || 0;
+
+        await connection.execute(
+          `INSERT INTO mileage_transactions (
+            member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
+          ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
+          [contract.member_id, mileageAmount, payment.contract_id, newBalance]
+        );
+      }
+
+      await connection.commit();
+      console.log('가상계좌 입금 완료 처리 완료');
+    }
+
+    res.json({ success: true, message: '처리 완료' });
+  } catch (error: any) {
+    await connection.rollback();
+    console.error('가상계좌 입금 통지 처리 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '처리 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
   }
 });
 

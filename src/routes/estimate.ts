@@ -5,20 +5,24 @@ import { sendEstimateEmail, calculateAge, calculatePremium, getInsuranceType } f
 const router = Router();
 
 // 견적 신청번호 생성 (YYYYMMDD + 일련번호)
-const generateRequestNumber = async (): Promise<string> => {
+// connection을 사용하여 트랜잭션 내에서 안전하게 생성
+const generateRequestNumber = async (connection: any): Promise<string> => {
   const today = new Date();
   const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+  const prefix = `EST${dateStr}`;
   
-  // 오늘 날짜로 시작하는 견적 신청 개수 조회
-  const [rows] = await pool.execute(
-    `SELECT COUNT(*) as count FROM estimate_requests 
-     WHERE DATE(created_at) = CURDATE()`
+  // 오늘 날짜로 시작하는 견적 신청의 최대 일련번호 조회 (SELECT FOR UPDATE로 락)
+  const [rows] = await connection.execute(
+    `SELECT MAX(CAST(SUBSTRING(request_number, 12) AS UNSIGNED)) as max_seq 
+     FROM estimate_requests 
+     WHERE request_number LIKE ? FOR UPDATE`,
+    [`${prefix}%`]
   ) as any[];
   
-  const count = rows[0]?.count || 0;
-  const sequence = String(count + 1).padStart(4, '0');
+  const maxSeq = rows[0]?.max_seq || 0;
+  const sequence = String(maxSeq + 1).padStart(4, '0');
   
-  return `EST${dateStr}${sequence}`;
+  return `${prefix}${sequence}`;
 };
 
 // 견적 신청 API
@@ -67,8 +71,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       });
     }
 
-    // 견적 신청번호 생성
-    const requestNumber = await generateRequestNumber();
+    // 견적 신청번호 생성 (트랜잭션 내에서 안전하게 생성)
+    const requestNumber = await generateRequestNumber(connection);
 
     // 1. estimate_requests 테이블에 기본 정보 저장
     const [result] = await connection.execute(
