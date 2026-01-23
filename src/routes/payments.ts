@@ -6,6 +6,19 @@ import { sendSms } from '../services/aligoService';
 
 const router = Router();
 
+const getNicepayApiBaseUrl = () => {
+  if (process.env.NICEPAY_API_BASE_URL) {
+    return process.env.NICEPAY_API_BASE_URL;
+  }
+
+  const env = (process.env.NICEPAY_ENVIRONMENT || '').toLowerCase();
+  if (env === 'test' || env === 'dev' || env === 'development') {
+    return 'https://sandbox-api.nicepay.co.kr';
+  }
+
+  return 'https://api.nicepay.co.kr';
+};
+
 // 나이스페이먼츠 결제 요청 (결제창 호출용 파라미터 생성)
 router.post('/api/payments/nicepay/request', async (req: Request, res: Response) => {
   try {
@@ -111,7 +124,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
     }
 
     const approveResponse = await axios.post(
-      `https://api.nicepay.co.kr/v1/payments/${tid}`,
+      `${getNicepayApiBaseUrl()}/v1/payments/${tid}`,
       approveData,
       {
         headers: {
@@ -569,7 +582,8 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
     const vbankExpDate = `${year}${month}${day}${hours}${minutes}${seconds}`;
 
     // 웹훅 URL 설정 (가상계좌 입금 통지용)
-    const notifyUrl = `${process.env.BACKEND_URL || 'http://localhost:4000'}/api/payments/nicepay/virtual-account/notify`;
+    const notifyBaseUrl = process.env.FRONTEND_URL || process.env.BACKEND_URL || 'http://localhost:4000';
+    const notifyUrl = `${notifyBaseUrl}/api/payments/nicepay/virtual-account/notify`;
 
     // 가상계좌 발급 요청 (한 번에 처리)
     const virtualAccountData = {
@@ -588,7 +602,7 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
     console.log('나이스페이 가상계좌 발급 API 호출:', virtualAccountData);
 
     const nicepayResponse = await axios.post(
-      'https://api.nicepay.co.kr/v1/payments',
+      `${getNicepayApiBaseUrl()}/v1/payments`,
       virtualAccountData,
       {
         headers: {
