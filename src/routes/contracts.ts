@@ -179,9 +179,14 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
         m.name as member_name,
         m.birth_date as member_birth_date,
         m.mobile_phone as member_phone,
-        m.email as member_email
+        m.email as member_email,
+        (SELECT COUNT(*) FROM insured_persons ip WHERE ip.contract_id = tc.id) as insured_persons_count,
+        ctr.contractor_type,
+        ctr.company_name,
+        ctr.name as contractor_name
       FROM travel_contracts tc
       LEFT JOIN members m ON tc.member_id = m.id
+      LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
       WHERE tc.id = ?`,
       [contractId]
     );
@@ -194,6 +199,33 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
     }
 
     const contract = contracts[0];
+
+    // 결제 정보 조회 (payments 테이블에서)
+    let paymentMethod = contract.payment_method || null;
+    let paymentStatus = contract.payment_status || '미결제';
+    
+    // payments 테이블에서 결제 정보 조회 시도
+    try {
+      const [payments] = await pool.execute<any[]>(
+        `SELECT payment_method, status 
+         FROM payments 
+         WHERE contract_id = ? 
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [contractId]
+      );
+      
+      if (payments.length > 0) {
+        paymentMethod = payments[0].payment_method || paymentMethod;
+        paymentStatus = payments[0].status || paymentStatus;
+      }
+    } catch (error) {
+      console.error('결제 정보 조회 오류:', error);
+      // payments 테이블이 없거나 오류가 발생해도 계속 진행
+    }
+
+    // 실제 피보험자 수 계산 (insured_persons 테이블에서)
+    const actualInsuredCount = contract.insured_persons_count || contract.travel_participants || 1;
 
     // 데이터 포맷팅
     const formattedContract = {
@@ -212,6 +244,11 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       travelRegion: contract.travel_region || null,
       travelCountry: contract.travel_country || null,
       travelPurpose: contract.travel_purpose || null,
+      travelParticipants: actualInsuredCount, // 실제 피보험자 수
+      paymentMethod: paymentMethod || '무통장입금', // 결제방법
+      paymentStatus: paymentStatus || '미결제', // 결제여부
+      contractorType: contract.contractor_type || '개인', // 계약자 유형
+      contractorCompanyName: contract.company_name || null, // 법인명 (법인인 경우)
     };
 
     res.json({
@@ -223,6 +260,148 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: '계약 상세 정보를 불러오는 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 계약 피보험자 정보 조회 (premium-detail 페이지용)
+router.get('/api/contracts/:id/participants', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'contract_id가 필요합니다.',
+      });
+    }
+
+    const contractId = parseInt(id, 10);
+
+    if (isNaN(contractId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 contract_id입니다.',
+      });
+    }
+
+    // 피보험자 정보 조회 (companions 테이블에서 직접 조회 - 모든 피보험자 정보가 여기에 있음)
+    const [companionsData] = await pool.execute<any[]>(
+      `SELECT 
+        c.id,
+        c.name,
+        c.gender,
+        c.resident_number,
+        c.sequence_number,
+        c.plan_type,
+        c.premium,
+        c.has_medical_expense
+      FROM companions c
+      WHERE c.contract_id = ?
+      ORDER BY c.sequence_number ASC`,
+      [contractId]
+    );
+
+    // companions가 없으면 insured_persons에서 조회 (fallback)
+    let insuredPersons = companionsData;
+    if (companionsData.length === 0) {
+      const [insured] = await pool.execute<any[]>(
+        `SELECT 
+          ip.id,
+          ip.name,
+          ip.gender,
+          ip.resident_number,
+          ip.sequence_number,
+          NULL as plan_type,
+          0 as premium,
+          0 as has_medical_expense
+        FROM insured_persons ip
+        WHERE ip.contract_id = ?
+        ORDER BY ip.sequence_number ASC`,
+        [contractId]
+      );
+      insuredPersons = insured;
+    }
+
+    // 계약 정보 조회 (총 보험료 등)
+    const [contracts] = await pool.execute<any[]>(
+      `SELECT total_premium, insurance_type
+       FROM travel_contracts
+       WHERE id = ?`,
+      [contractId]
+    );
+
+    if (contracts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const contract = contracts[0];
+
+    // 생년월일 포맷팅 함수
+    const formatBirthDate = (residentNumber: string | null) => {
+      if (!residentNumber) return '';
+      const cleaned = residentNumber.replace(/-/g, '');
+      if (cleaned.length >= 6) {
+        const year = cleaned.substring(0, 2);
+        const month = cleaned.substring(2, 4);
+        const day = cleaned.substring(4, 6);
+        // 1900년대 또는 2000년대 판단 (간단히 앞자리로 판단)
+        const fullYear = parseInt(year) < 50 ? `20${year}` : `19${year}`;
+        return `${fullYear}.${month}.${day}`;
+      }
+      return '';
+    };
+
+    // 총 보험료를 Number로 변환
+    const totalPremium = contract.total_premium ? Number(contract.total_premium) : 0;
+    
+    // 피보험자 데이터 포맷팅
+    const participants = insuredPersons.map((person: any) => {
+      // premium을 Number로 명시적으로 변환 (DECIMAL 타입 처리)
+      let premium = 0;
+      if (person.premium !== null && person.premium !== undefined) {
+        premium = Number(person.premium);
+        if (isNaN(premium)) premium = 0;
+      }
+      
+      return {
+        id: person.id,
+        name: person.name || '',
+        gender: person.gender || '남자',
+        birthDate: formatBirthDate(person.resident_number),
+        planType: person.plan_type || '',
+        premium: premium,
+      };
+    });
+
+    // premium이 모두 0이거나 NULL인 경우, total_premium을 피보험자 수로 나눠서 분배
+    const hasAnyPremium = participants.some(p => p.premium > 0);
+    if (!hasAnyPremium && totalPremium > 0 && participants.length > 0) {
+      const premiumPerPerson = Math.floor(totalPremium / participants.length);
+      participants.forEach(p => {
+        p.premium = premiumPerPerson;
+      });
+    }
+
+    // has_medical_expense는 첫 번째 피보험자 또는 companions에서 가져오기
+    const hasMedicalExpense = insuredPersons.length > 0 
+      ? (insuredPersons[0].has_medical_expense !== undefined ? insuredPersons[0].has_medical_expense : true)
+      : true;
+
+    res.json({
+      success: true,
+      participants,
+      totalPremium: totalPremium,
+      hasMedicalExpense: hasMedicalExpense === 1 || hasMedicalExpense === true,
+    });
+  } catch (error) {
+    console.error('피보험자 정보 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '피보험자 정보를 불러오는 중 오류가 발생했습니다.',
     });
   }
 });

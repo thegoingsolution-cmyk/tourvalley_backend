@@ -382,6 +382,11 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
 
     const { contract, contractor, insured_persons, companions, payment } = req.body;
 
+    // 수기카드 데이터 확인용 로그
+    if (payment?.payment_sub_method === '수기카드') {
+      console.log('백엔드 수신 수기카드 결제 데이터:', JSON.stringify(payment, null, 2));
+    }
+
     // 계약번호 생성
     const contract_number = generateContractNumber();
 
@@ -515,6 +520,19 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
 
       // 결제 상세 정보 저장 (수기카드, 무통장입금)
       if (payment_id && (payment.payment_sub_method === '수기카드' || payment.payment_sub_method === '무통장입금')) {
+        console.log('payment_details 저장 시도:', {
+          payment_id,
+          payment_sub_method: payment.payment_sub_method,
+          card_type: payment.card_type,
+          card_category: payment.card_category,
+          card_number: payment.card_number,
+          card_expiry_month: payment.card_expiry_month,
+          card_expiry_year: payment.card_expiry_year,
+          cardholder_name: payment.cardholder_name,
+          cardholder_resident_number: payment.cardholder_resident_number,
+          approval_date: payment.approval_date,
+        });
+        
         await connection.execute(
           `INSERT INTO payment_details (
             payment_id, payment_method,
@@ -542,6 +560,14 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
             payment.receipt_premium || 0,
           ]
         );
+        
+        console.log('payment_details 저장 완료');
+      } else {
+        console.log('payment_details 저장 조건 불일치:', {
+          payment_id,
+          payment_sub_method: payment.payment_sub_method,
+          condition: payment_id && (payment.payment_sub_method === '수기카드' || payment.payment_sub_method === '무통장입금')
+        });
       }
     }
 
