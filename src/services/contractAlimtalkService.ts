@@ -56,8 +56,7 @@ export const sendContractCompleteAlimTalk = async (
       ctr.phone,
       ctr.mobile_phone,
       m.name as member_name,
-      m.mobile_phone as member_phone,
-      (SELECT COUNT(*) FROM insured_persons ip WHERE ip.contract_id = tc.id) as insured_count
+      m.mobile_phone as member_phone
      FROM travel_contracts tc
      LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
      LEFT JOIN members m ON tc.member_id = m.id
@@ -77,9 +76,17 @@ export const sendContractCompleteAlimTalk = async (
     return;
   }
 
-  const insuredCount = Number(contract.insured_count || contract.travel_participants || 1);
+  // companions 테이블에서 동반인(실제 보험 가입자) 수 조회
+  // 계약자는 실제 보험에 가입하지 않을 수 있음 (명의만 사용)
+  const [companionRows] = await pool.execute<any[]>(
+    `SELECT COUNT(*) as companion_count FROM companions WHERE contract_id = ?`,
+    [contractId]
+  );
+  const companionCount = Number(companionRows[0]?.companion_count || 0);
+  
+  // 계약자명 외 동반인 수 표시
   const participantSummary =
-    insuredCount > 1 ? `${customerName} 외 ${insuredCount - 1}명` : customerName;
+    companionCount > 0 ? `${customerName} 외 ${companionCount}명` : customerName;
 
   let travelDestination = [contract.travel_region, contract.travel_country]
     .filter((value: string | null) => !!value)
