@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import { sendEstimateEmail, calculateAge, calculatePremium, getInsuranceType } from '../services/emailService';
+import { generateAlimTalkMessage } from '../services/alimtalkMessageGenerator';
+import { sendAlimTalk } from '../services/aligoService';
 
 const router = Router();
 
@@ -249,6 +251,42 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
 
     // 상태를 신청으로 유지 (관리자가 견적 발송 버튼을 누를 때까지)
     // 이메일 발송은 관리자 화면에서 "견적 발송" 버튼을 통해 처리
+
+    try {
+      const now = new Date();
+      const requestDateTime = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+        now.getDate()
+      ).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+      const insurancePeriod = `${start_date} ${start_hour}시 ~ ${end_date} ${end_hour}시`;
+      const insuranceProduct = getInsuranceType(product_cd);
+      const participantSummary =
+        participants.length > 1 ? `${contractor_name} 외 ${participants.length - 1}명` : contractor_name;
+
+      const message = generateAlimTalkMessage('estimate_request', {
+        customerName: contractor_name,
+        queryDate: requestDateTime,
+        insuranceProduct,
+        insurancePeriod,
+        participants: participantSummary,
+      });
+
+      await sendAlimTalk({
+        receiver: contractor_phone,
+        template_code: 'UE_8120',
+        subject: '여행자 보험 견적 신청',
+        message,
+        receiver_name: contractor_name,
+        button: [
+          {
+            name: '채널 추가',
+            linkType: 'AC',
+          },
+        ],
+      });
+    } catch (error) {
+      console.error('견적신청 알림톡 발송 실패:', error);
+    }
 
     return res.json({
       success: true,

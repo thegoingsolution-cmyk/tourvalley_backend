@@ -3,6 +3,7 @@ import pool from '../config/database';
 import axios from 'axios';
 import crypto from 'crypto';
 import { sendSms } from '../services/aligoService';
+import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 
 const router = Router();
 
@@ -18,6 +19,121 @@ const getNicepayApiBaseUrl = () => {
 
   return 'https://api.nicepay.co.kr';
 };
+
+const extractVbankInfo = (responseData: any) => {
+  const vbank = responseData?.vbank || {};
+  const bankCode =
+    vbank.bankCode ||
+    vbank.bankCd ||
+    vbank.vbankCode ||
+    responseData?.vbankBankCode ||
+    responseData?.bankCode ||
+    responseData?.bankCd ||
+    '';
+  const bankName =
+    vbank.bankName ||
+    vbank.bank ||
+    vbank.vbankName ||
+    responseData?.vbankBankName ||
+    responseData?.bankName ||
+    responseData?.bank ||
+    bankCode ||
+    '';
+  const accountNumber =
+    vbank.accountNumber ||
+    vbank.account ||
+    vbank.vbankNumber ||
+    responseData?.vbankNum ||
+    responseData?.accountNumber ||
+    responseData?.account ||
+    responseData?.vbankAccount ||
+    responseData?.vbankAccountNo ||
+    '';
+  const accountHolderName =
+    vbank.accountHolderName ||
+    vbank.accountHolder ||
+    vbank.vbankHolder ||
+    responseData?.vbankHolder ||
+    responseData?.accountHolderName ||
+    responseData?.accountHolder ||
+    '';
+  const expireDate =
+    vbank.expireDate ||
+    vbank.expDate ||
+    responseData?.vbankExpDate ||
+    responseData?.expireDate ||
+    responseData?.expDate ||
+    '';
+
+  return {
+    accountNumber,
+    bankName,
+    bankCode,
+    accountHolderName,
+    expireDate,
+  };
+};
+
+const isReceiptUrl = (value: string) => {
+  return value.startsWith('http://') || value.startsWith('https://');
+};
+
+const extractReceiptUrl = (responseData: any): string | null => {
+  if (!responseData) {
+    return null;
+  }
+
+  const knownKeys = new Set([
+    'receipturl',
+    'receipt_url',
+    'cashreceipturl',
+    'cash_receipt_url',
+    'cardreceipturl',
+    'card_receipt_url',
+  ]);
+
+  const findUrl = (value: any, keyHint?: string): string | null => {
+    if (!value) {
+      return null;
+    }
+
+    if (typeof value === 'string') {
+      if (keyHint && keyHint.toLowerCase().includes('receipt') && isReceiptUrl(value)) {
+        return value;
+      }
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findUrl(item, keyHint);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    if (typeof value === 'object') {
+      const entries = Object.entries(value);
+      for (const [key, nestedValue] of entries) {
+        if (knownKeys.has(key.toLowerCase()) && typeof nestedValue === 'string' && isReceiptUrl(nestedValue)) {
+          return nestedValue;
+        }
+      }
+      for (const [key, nestedValue] of entries) {
+        if (key.toLowerCase().includes('receipt') && typeof nestedValue === 'string' && isReceiptUrl(nestedValue)) {
+          return nestedValue;
+        }
+        const found = findUrl(nestedValue, key);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  };
+
+  return findUrl(responseData);
+};
+
 
 // 나이스페이먼츠 결제 요청 (결제창 호출용 파라미터 생성)
 router.post('/api/payments/nicepay/request', async (req: Request, res: Response) => {
@@ -59,6 +175,101 @@ router.post('/api/payments/nicepay/request', async (req: Request, res: Response)
       success: false,
       message: '결제 요청 중 오류가 발생했습니다.',
       error: error.message,
+    });
+  }
+});
+
+// 결제 영수증 URL 조회 (나이스페이/네이버페이/카카오페이)
+router.get('/api/payments/receipt', async (req: Request, res: Response) => {
+  try {
+    const { contract_id } = req.query;
+
+    if (!contract_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'contract_id가 필요합니다.',
+      });
+    }
+
+    const contractId = parseInt(contract_id as string, 10);
+    if (isNaN(contractId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 contract_id입니다.',
+      });
+    }
+
+    const [payments] = await pool.execute<any[]>(
+      `SELECT id, payment_method, status, receipt_url, pg_response
+       FROM payments
+       WHERE contract_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [contractId]
+    );
+
+    if (payments.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '결제 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const payment = payments[0];
+    const supportedMethods = ['나이스페이먼츠', '네이버페이', '카카오페이'];
+    if (!supportedMethods.includes(payment.payment_method)) {
+      return res.status(400).json({
+        success: false,
+        message: '해당 결제 수단의 영수증은 준비 중입니다.',
+      });
+    }
+
+    if (payment.status !== '완료') {
+      return res.status(400).json({
+        success: false,
+        message: '결제 완료 후 영수증을 확인할 수 있습니다.',
+      });
+    }
+
+    let receiptUrl: string | null = payment.receipt_url || null;
+    let pgResponse = payment.pg_response;
+
+    if (!receiptUrl && pgResponse) {
+      if (typeof pgResponse === 'string') {
+        try {
+          pgResponse = JSON.parse(pgResponse);
+        } catch (error) {
+          pgResponse = null;
+        }
+      }
+
+      receiptUrl = extractReceiptUrl(pgResponse);
+    }
+
+    if (!receiptUrl) {
+      return res.status(404).json({
+        success: false,
+        message: '영수증 URL을 찾을 수 없습니다.',
+      });
+    }
+
+    if (!payment.receipt_url) {
+      await pool.execute(
+        'UPDATE payments SET receipt_url = ? WHERE id = ?',
+        [receiptUrl, payment.id]
+      );
+    }
+
+    res.json({
+      success: true,
+      receiptUrl,
+      paymentMethod: payment.payment_method,
+    });
+  } catch (error) {
+    console.error('Receipt URL 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '영수증 정보를 불러오는 중 오류가 발생했습니다.',
     });
   }
 });
@@ -146,11 +357,12 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
         console.log('✅ 나이스페이 가상계좌 발급 성공!');
         
         // 가상계좌 정보 추출
-        const vbank = approveResponse.data.vbank || {};
-        const accountNumber = vbank.accountNumber || vbank.account || '';
-        const bankName = vbank.bankName || vbank.bank || '';
-        const accountHolderName = vbank.accountHolderName || vbank.accountHolder || '';
-        const expireDate = vbank.expireDate || vbank.expDate || '';
+        const {
+          accountNumber,
+          bankName,
+          accountHolderName,
+          expireDate,
+        } = extractVbankInfo(approveResponse.data);
 
         if (!accountNumber || !bankName) {
           throw new Error('가상계좌 정보를 받지 못했습니다.');
@@ -180,7 +392,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
 
         // 계약 정보 조회 (고객 전화번호 확인)
         const [contractRows] = await connection.execute<any[]>(
-          `SELECT tc.*, c.phone, c.email, c.name as contractor_name
+          `SELECT tc.*, c.phone, c.mobile_phone, c.email, c.name as contractor_name
            FROM travel_contracts tc
            LEFT JOIN contractors c ON tc.id = c.contract_id
            WHERE tc.id = ? LIMIT 1`,
@@ -189,7 +401,8 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
         const contract = contractRows[0];
 
         // SMS 발송
-        if (contract?.phone) {
+        const recipientPhone = contract?.phone || contract?.mobile_phone;
+        if (recipientPhone) {
           const smsMessage = `[투어밸리] 여행보험료 입금 안내
 
 은행: ${bankName}
@@ -202,7 +415,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
           try {
             // 알리고 SMS 발송
             await sendSms({
-              receiver: contract.phone,
+              receiver: recipientPhone,
               message: smsMessage,
               title: '[투어밸리] 여행보험료 입금 안내',
             });
@@ -293,6 +506,12 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
 
         await connection.commit();
 
+        try {
+          await sendContractCompleteAlimTalk(contract_id, '나이스페이먼츠');
+        } catch (alimtalkError) {
+          console.error('가입완료 알림톡 발송 실패:', alimtalkError);
+        }
+
         console.log('DB에 결제 정보 저장 완료, payment_id:', payment_id);
         
         res.json({
@@ -371,7 +590,21 @@ router.post('/api/payments/nicepay/cancel', async (req: Request, res: Response) 
     }
 
     const payment = paymentRows[0];
-    const pgResponse = payment.pg_response ? JSON.parse(payment.pg_response) : {};
+    console.log('vbank refund pg_response type:', typeof payment.pg_response);
+    console.log('vbank refund pg_response raw:', payment.pg_response);
+    let pgResponse: any = {};
+    if (payment.pg_response) {
+      if (typeof payment.pg_response === 'string') {
+        try {
+          pgResponse = JSON.parse(payment.pg_response);
+        } catch (parseError) {
+          console.warn('vbank refund pg_response parse failed, using raw value');
+          pgResponse = {};
+        }
+      } else if (typeof payment.pg_response === 'object') {
+        pgResponse = payment.pg_response;
+      }
+    }
     const tid = pgResponse.tid || payment.pg_transaction_id;
 
     if (!tid) {
@@ -444,6 +677,162 @@ router.post('/api/payments/nicepay/cancel', async (req: Request, res: Response) 
     res.status(500).json({
       success: false,
       message: '결제 취소 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// 나이스페이 가상계좌 환불 (관리용 간이 API)
+router.post('/api/payments/nicepay/vbank-refund', async (req: Request, res: Response) => {
+  const connection = await pool.getConnection();
+
+  try {
+    const {
+      payment_id,
+      orderId,
+      tid,
+      cancelAmt,
+      reason,
+      refundAccount,
+      refundBankCode,
+      refundHolder,
+    } = req.body;
+
+    if (!refundAccount || !refundBankCode || !refundHolder) {
+      return res.status(400).json({
+        success: false,
+        message: '환불계좌 정보(은행코드/계좌/예금주)가 필요합니다.',
+      });
+    }
+
+    const [paymentRows] = await connection.execute<any[]>(
+      payment_id
+        ? 'SELECT * FROM payments WHERE id = ?'
+        : orderId
+          ? 'SELECT * FROM payments WHERE payment_number = ?'
+          : tid
+            ? 'SELECT * FROM payments WHERE pg_transaction_id = ?'
+            : 'SELECT * FROM payments WHERE 1=0',
+      [payment_id || orderId || tid]
+    );
+
+    if (!paymentRows || paymentRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '결제 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const payment = paymentRows[0];
+    console.log('vbank refund pg_response type:', typeof payment.pg_response);
+    console.log('vbank refund pg_response raw:', payment.pg_response);
+    let pgResponse: any = {};
+    if (payment.pg_response) {
+      if (typeof payment.pg_response === 'string') {
+        try {
+          pgResponse = JSON.parse(payment.pg_response);
+        } catch (parseError) {
+          console.warn('vbank refund pg_response parse failed, using raw value');
+          pgResponse = {};
+        }
+      } else if (typeof payment.pg_response === 'object') {
+        pgResponse = payment.pg_response;
+      }
+    }
+    const resolvedTid = tid || pgResponse.tid || payment.pg_transaction_id;
+    const resolvedOrderId = orderId || payment.payment_number || pgResponse.orderId;
+
+    if (!resolvedTid || !resolvedOrderId) {
+      return res.status(400).json({
+        success: false,
+        message: '결제 거래 정보(tid/orderId)가 부족합니다.',
+      });
+    }
+
+    const refundAmount = cancelAmt ? parseInt(cancelAmt, 10) : parseInt(payment.amount, 10);
+    if (!refundAmount || refundAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: '환불 금액이 올바르지 않습니다.',
+      });
+    }
+
+    const clientKey = process.env.NICEPAY_CLIENT_KEY || '';
+    const secretKey = process.env.NICEPAY_SECRET_KEY || '';
+    const authHeader = Buffer.from(`${clientKey}:${secretKey}`).toString('base64');
+
+    const cancelOrderId = `${resolvedOrderId}-RF${Date.now()}`;
+    const cancelPayload: any = {
+      reason: reason || '관리자 환불',
+      orderId: cancelOrderId,
+      refundAccount,
+      refundBankCode,
+      refundHolder,
+    };
+    const isEscrow = pgResponse?.useEscrow === true;
+    const paymentAmount = parseInt(payment.amount, 10);
+    const isFullRefund = refundAmount === paymentAmount;
+    if (!(isEscrow && isFullRefund)) {
+      cancelPayload.cancelAmt = refundAmount;
+    }
+
+    console.log('vbank refund request payload:', cancelPayload);
+    const nicepayResponse = await axios.post(
+      `${getNicepayApiBaseUrl()}/v1/payments/${resolvedTid}/cancel`,
+      cancelPayload,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Basic ${authHeader}`,
+        },
+      }
+    );
+    console.log('vbank refund response:', nicepayResponse.data);
+
+    if (nicepayResponse.data?.resultCode === '0000') {
+      await connection.beginTransaction();
+      await connection.execute(
+        `UPDATE payments
+         SET status = '환불', refund_amount = ?, refund_date = ?, refund_reason = ?,
+             pg_response = JSON_MERGE_PATCH(COALESCE(pg_response, '{}'), ?)
+         WHERE id = ?`,
+        [
+          refundAmount,
+          new Date(),
+          cancelPayload.reason,
+          JSON.stringify(nicepayResponse.data),
+          payment.id,
+        ]
+      );
+
+      await connection.execute(
+        `UPDATE travel_contracts
+         SET payment_status = '미결제'
+         WHERE id = ?`,
+        [payment.contract_id]
+      );
+
+      await connection.commit();
+      return res.json({
+        success: true,
+        message: '가상계좌 환불이 요청되었습니다.',
+        data: nicepayResponse.data,
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: nicepayResponse.data?.resultMsg || '환불 요청에 실패했습니다.',
+      data: nicepayResponse.data,
+    });
+  } catch (error: any) {
+    await connection.rollback();
+    console.error('Nicepay vbank refund error:', error);
+    res.status(500).json({
+      success: false,
+      message: '가상계좌 환불 처리 중 오류가 발생했습니다.',
       error: error.message,
     });
   } finally {
@@ -616,11 +1005,12 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
 
     if (nicepayResponse.data.resultCode === '0000') {
       // 가상계좌 정보는 vbank 객체 안에 있음
-      const vbank = nicepayResponse.data.vbank || {};
-      const accountNumber = vbank.accountNumber || vbank.account || '';
-      const bankName = vbank.bankName || vbank.bank || '';
-      const accountHolderName = vbank.accountHolderName || vbank.accountHolder || '';
-      const expireDate = vbank.expireDate || vbank.expDate || '';
+      const {
+        accountNumber,
+        bankName,
+        accountHolderName,
+        expireDate,
+      } = extractVbankInfo(nicepayResponse.data);
 
       if (!accountNumber || !bankName) {
         throw new Error('가상계좌 정보를 받지 못했습니다.');
@@ -652,7 +1042,7 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
 
       // 계약 정보 조회 (고객 전화번호 확인)
       const [contractRows] = await connection.execute<any[]>(
-        `SELECT tc.*, c.phone, c.email, c.name as contractor_name
+        `SELECT tc.*, c.phone, c.mobile_phone, c.email, c.name as contractor_name
          FROM travel_contracts tc
          LEFT JOIN contractors c ON tc.id = c.contract_id
          WHERE tc.id = ? LIMIT 1`,
@@ -661,7 +1051,8 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
       const contract = contractRows[0];
 
       // SMS 발송
-      if (contract?.phone) {
+      const recipientPhone = contract?.phone || contract?.mobile_phone;
+      if (recipientPhone) {
         const smsMessage = `[투어밸리] 여행보험료 입금 안내
 
 은행: ${bankName}
@@ -674,7 +1065,7 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
         try {
           // 알리고 SMS 발송
           await sendSms({
-            receiver: contract.phone,
+            receiver: recipientPhone,
             message: smsMessage,
             title: '[투어밸리] 여행보험료 입금 안내',
           });
@@ -732,7 +1123,7 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
     console.log('===== 나이스페이 가상계좌 입금 통지 =====');
     console.log('받은 데이터:', req.body);
 
-    const { orderId, tid, status, accountNumber, bankName, amount, mallReserved } = req.body;
+    const { orderId, tid, status, accountNumber, bankName, amount, mallReserved, resultCode, paidAt } = req.body;
 
     // 웹훅 등록 테스트 요청인지 확인 (mallReserved에 테스트 메시지가 있는 경우)
     const isTestRequest = mallReserved && (
@@ -760,7 +1151,16 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
 
     const payment = paymentRows[0];
 
-    if (status === 'PAID' || status === '입금완료') {
+    const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : '';
+    const isPaidStatus =
+      normalizedStatus === 'paid' ||
+      normalizedStatus === '입금완료' ||
+      normalizedStatus === 'deposit' ||
+      normalizedStatus === 'depositcomplete' ||
+      normalizedStatus === 'pay';
+    const isPaidByResult = resultCode === '0000' && !!paidAt;
+
+    if (isPaidStatus || isPaidByResult) {
       await connection.beginTransaction();
 
       // 결제 상태 업데이트
@@ -810,6 +1210,13 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
       }
 
       await connection.commit();
+
+      try {
+        await sendContractCompleteAlimTalk(payment.contract_id, '기타결제', '가상계좌');
+      } catch (alimtalkError) {
+        console.error('가입완료 알림톡 발송 실패:', alimtalkError);
+      }
+
       console.log('가상계좌 입금 완료 처리 완료');
     }
 

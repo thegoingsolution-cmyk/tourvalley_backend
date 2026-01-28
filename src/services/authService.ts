@@ -1,6 +1,8 @@
 import pool from '../config/database';
 import { ResultSetHeader, RowDataPacket } from 'mysql2';
 import crypto from 'crypto';
+import { generateAlimTalkMessage } from './alimtalkMessageGenerator';
+import { sendAlimTalk } from './aligoService';
 
 // 비밀번호 해시 함수
 const hashPassword = (password: string): string => {
@@ -206,6 +208,28 @@ export const registerPersonalMember = async (data: PersonalMemberData): Promise<
 
     await connection.commit();
 
+    try {
+      const message = generateAlimTalkMessage('signup', {
+        customerName: data.name,
+      });
+
+      await sendAlimTalk({
+        receiver: data.phone,
+        template_code: 'UE_8117',
+        subject: '회원 가입',
+        message,
+        receiver_name: data.name,
+        button: [
+          {
+            name: '채널 추가',
+            linkType: 'AC',
+          },
+        ],
+      });
+    } catch (error) {
+      console.error('회원가입 알림톡 발송 실패:', error);
+    }
+
     console.log(`✅ 개인회원 가입 완료: ${data.username} (ID: ${memberId})`);
 
     return {
@@ -359,6 +383,28 @@ export const registerCorporateMember = async (data: CorporateMemberData): Promis
     );
 
     await connection.commit();
+
+    try {
+      const message = generateAlimTalkMessage('signup', {
+        customerName: primaryContact.name,
+      });
+
+      await sendAlimTalk({
+        receiver: data.primaryPhone,
+        template_code: 'UE_8117',
+        subject: '회원 가입',
+        message,
+        receiver_name: primaryContact.name,
+        button: [
+          {
+            name: '채널 추가',
+            linkType: 'AC',
+          },
+        ],
+      });
+    } catch (error) {
+      console.error('회원가입 알림톡 발송 실패:', error);
+    }
 
     console.log(`✅ 법인회원 가입 완료: ${data.username} (ID: ${memberId})`);
 

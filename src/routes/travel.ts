@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
+import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 
 const router = Router();
 
@@ -554,7 +555,7 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
             payment.approval_date || null,
             payment.bank_name || null,
             payment.depositor_name || null,
-            null, // expected_deposit_date는 별도로 처리 필요
+            payment.expected_deposit_date || null,
             null, // deposit_date는 별도로 처리 필요
             payment.normal_premium || 0,
             payment.receipt_premium || 0,
@@ -986,7 +987,11 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
             );
           }
 
-          // TODO: 알림톡 발송 (선택사항)
+          try {
+            await sendContractCompleteAlimTalk(contractId, '네이버페이');
+          } catch (alimtalkError) {
+            console.error('가입완료 알림톡 발송 실패:', alimtalkError);
+          }
 
           await connection.commit();
           connection.release();
@@ -1329,7 +1334,11 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
           );
         }
 
-        // TODO: 알림톡 발송 (선택사항)
+        try {
+          await sendContractCompleteAlimTalk(contract_id, '카카오페이');
+        } catch (alimtalkError) {
+          console.error('가입완료 알림톡 발송 실패:', alimtalkError);
+        }
 
         await connection.commit();
         connection.release();

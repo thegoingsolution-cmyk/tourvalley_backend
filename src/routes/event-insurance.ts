@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
+import { generateAlimTalkMessage } from '../services/alimtalkMessageGenerator';
+import { sendAlimTalk } from '../services/aligoService';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -280,6 +282,27 @@ router.post('/api/event-insurance/estimate', upload.fields([
     );
 
     await connection.commit();
+
+    try {
+      const customerName = req.body.contractor_name || '고객';
+      const phoneNumber = req.body.ctel_no || req.body.tel_no || '';
+
+      if (phoneNumber) {
+        const message = generateAlimTalkMessage('event_estimate', {
+          customerName,
+        });
+
+        await sendAlimTalk({
+          receiver: phoneNumber,
+          template_code: 'UE_8396',
+          subject: '행사보험 견적 신청',
+          message,
+          receiver_name: customerName,
+        });
+      }
+    } catch (alimtalkError) {
+      console.error('행사보험 견적 알림톡 발송 실패:', alimtalkError);
+    }
 
     console.log('=== 견적 신청 완료 ===');
     console.log('계약번호:', contract_number);
