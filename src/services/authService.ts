@@ -9,6 +9,23 @@ const hashPassword = (password: string): string => {
   return crypto.createHash('sha256').update(password).digest('hex');
 };
 
+const normalizePhone = (phone: string): string => phone.replace(/[^0-9]/g, '');
+
+const mapMemberType = (memberType: string): '개인' | '법인' => {
+  if (memberType === 'C' || memberType === '법인') {
+    return '법인';
+  }
+  return '개인';
+};
+
+const mapGender = (gender?: string | null): string | null => {
+  if (!gender) return null;
+  if (gender === '1' || gender === '남자' || gender === 'male') return '남자';
+  if (gender === '2' || gender === '여자' || gender === 'female') return '여자';
+  return null;
+};
+
+
 // 회원 정보 인터페이스
 interface MemberInfo {
   id: number;
@@ -119,9 +136,172 @@ export const checkUsernameExists = async (username: string): Promise<boolean> =>
 export const checkPhoneVerified = async (phone: string): Promise<boolean> => {
   const [rows] = await pool.execute<RowDataPacket[]>(
     'SELECT id FROM phone_verifications WHERE mobile_phone = ? AND verified = 1 AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
-    [phone]
+    [normalizePhone(phone)]
   );
   return rows.length > 0;
+};
+
+interface FindIdParams {
+  memberType: 'I' | 'C';
+  name?: string;
+  companyName?: string;
+  businessNumber?: string;
+  birthDate?: string;
+  gender?: string;
+  phoneNumber: string;
+}
+
+export const findMemberUsername = async (params: FindIdParams): Promise<{ success: boolean; message: string; username?: string }> => {
+  const memberType = mapMemberType(params.memberType);
+  const cleanPhone = normalizePhone(params.phoneNumber);
+
+  const phoneVerified = await checkPhoneVerified(cleanPhone);
+  if (!phoneVerified) {
+    return { success: false, message: '휴대폰 인증이 완료되지 않았습니다.' };
+  }
+
+  if (memberType === '개인') {
+    if (!params.name || !params.birthDate || !params.gender) {
+      return { success: false, message: '이름, 생년월일, 성별을 입력해주세요.' };
+    }
+    const gender = mapGender(params.gender);
+    const [rows] = await pool.execute<RowDataPacket[]>(
+      `SELECT username, status
+       FROM members
+       WHERE member_type = '개인'
+         AND name = ?
+         AND birth_date = ?
+         AND gender = ?
+         AND mobile_phone = ?`,
+      [params.name, params.birthDate, gender, cleanPhone]
+    );
+    if (rows.length === 0) {
+      return { success: false, message: '일치하는 회원 정보를 찾을 수 없습니다.' };
+    }
+    const member = rows[0] as { username: string; status: string };
+    if (member.status === '탈퇴') {
+      return { success: false, message: '탈퇴한 계정입니다.' };
+    }
+    return { success: true, message: '아이디를 찾았습니다.', username: member.username };
+  }
+
+  if (!params.companyName || !params.businessNumber) {
+    return { success: false, message: '회사명과 사업자번호를 입력해주세요.' };
+  }
+
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT m.username, m.status
+     FROM members m
+     JOIN corporate_members c ON c.member_id = m.id
+     WHERE m.member_type = '법인'
+       AND c.company_name = ?
+       AND c.business_number = ?
+       AND m.mobile_phone = ?`,
+    [params.companyName, params.businessNumber, cleanPhone]
+  );
+
+  if (rows.length === 0) {
+    return { success: false, message: '일치하는 회원 정보를 찾을 수 없습니다.' };
+  }
+
+  const member = rows[0] as { username: string; status: string };
+  if (member.status === '탈퇴') {
+    return { success: false, message: '탈퇴한 계정입니다.' };
+  }
+  return { success: true, message: '아이디를 찾았습니다.', username: member.username };
+};
+
+interface ResetPasswordParams {
+  memberType: 'I' | 'C';
+  username: string;
+  name?: string;
+  companyName?: string;
+  businessNumber?: string;
+  birthDate?: string;
+  gender?: string;
+  phoneNumber: string;
+}
+
+const getMemberForReset = async (
+  params: ResetPasswordParams
+): Promise<{ id: number; status: string } | null> => {
+  const memberType = mapMemberType(params.memberType);
+  const cleanPhone = normalizePhone(params.phoneNumber);
+
+  const phoneVerified = await checkPhoneVerified(cleanPhone);
+  if (!phoneVerified) {
+    return null;
+  }
+
+  if (memberType === '개인') {
+    if (!params.name || !params.birthDate || !params.gender) {
+      return null;
+    }
+    const gender = mapGender(params.gender);
+    const [rows] = await pool.execute<RowDataPacket[]>(
+      `SELECT id, status
+       FROM members
+       WHERE member_type = '개인'
+         AND username = ?
+         AND name = ?
+         AND birth_date = ?
+         AND gender = ?
+         AND mobile_phone = ?`,
+      [params.username, params.name, params.birthDate, gender, cleanPhone]
+    );
+    return rows.length > 0 ? (rows[0] as { id: number; status: string }) : null;
+  }
+
+  if (!params.companyName || !params.businessNumber) {
+    return null;
+  }
+
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT m.id, m.status
+     FROM members m
+     JOIN corporate_members c ON c.member_id = m.id
+     WHERE m.member_type = '법인'
+       AND m.username = ?
+       AND c.company_name = ?
+       AND c.business_number = ?
+       AND m.mobile_phone = ?`,
+    [params.username, params.companyName, params.businessNumber, cleanPhone]
+  );
+
+  return rows.length > 0 ? (rows[0] as { id: number; status: string }) : null;
+};
+
+export const verifyResetPasswordIdentity = async (
+  params: ResetPasswordParams
+): Promise<{ success: boolean; message: string }> => {
+  const member = await getMemberForReset(params);
+  if (!member) {
+    return { success: false, message: '일치하는 회원 정보를 찾을 수 없습니다.' };
+  }
+  if (member.status === '탈퇴') {
+    return { success: false, message: '탈퇴한 계정입니다.' };
+  }
+  return { success: true, message: '본인 확인이 완료되었습니다.' };
+};
+
+interface ResetPasswordConfirmParams extends ResetPasswordParams {
+  newPassword: string;
+}
+
+export const updateMemberPasswordWithIdentity = async (
+  params: ResetPasswordConfirmParams
+): Promise<{ success: boolean; message: string }> => {
+  const member = await getMemberForReset(params);
+  if (!member) {
+    return { success: false, message: '일치하는 회원 정보를 찾을 수 없습니다.' };
+  }
+  if (member.status === '탈퇴') {
+    return { success: false, message: '탈퇴한 계정입니다.' };
+  }
+
+  const hashedPassword = hashPassword(params.newPassword);
+  await pool.execute('UPDATE members SET password = ? WHERE id = ?', [hashedPassword, member.id]);
+  return { success: true, message: '비밀번호가 재설정 되었습니다.' };
 };
 
 // 개인회원 가입

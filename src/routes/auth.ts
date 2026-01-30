@@ -6,7 +6,10 @@ import {
   loginMember,
   updateMember,
   getCorporateMemberInfo,
-  updateCorporateMember
+  updateCorporateMember,
+  findMemberUsername,
+  verifyResetPasswordIdentity,
+  updateMemberPasswordWithIdentity
 } from '../services/authService';
 
 const router = Router();
@@ -250,6 +253,160 @@ router.post('/register/corporate', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: '회원가입에 실패했습니다.',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/find-id
+ * 아이디 찾기
+ */
+router.post('/find-id', async (req: Request, res: Response) => {
+  try {
+    const {
+      memberType,
+      name,
+      companyName,
+      businessNumber,
+      birthDate,
+      gender,
+      phoneNumber,
+    } = req.body;
+
+    if (!memberType || !phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        message: '회원 유형과 휴대폰 번호를 입력해주세요.',
+      });
+    }
+
+    const result = await findMemberUsername({
+      memberType,
+      name,
+      companyName,
+      businessNumber,
+      birthDate,
+      gender,
+      phoneNumber,
+    });
+
+    if (result.success) {
+      return res.json(result);
+    }
+
+    return res.status(400).json(result);
+  } catch (error) {
+    console.error('아이디 찾기 API 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: '아이디 찾기에 실패했습니다.',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/reset-password/verify
+ * 비밀번호 재설정 본인 확인
+ */
+router.post('/reset-password/verify', async (req: Request, res: Response) => {
+  try {
+    const {
+      memberType,
+      username,
+      name,
+      companyName,
+      businessNumber,
+      birthDate,
+      gender,
+      phoneNumber,
+    } = req.body;
+
+    if (!memberType || !username || !phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        message: '회원 유형, 아이디, 휴대폰 번호를 입력해주세요.',
+      });
+    }
+
+    const result = await verifyResetPasswordIdentity({
+      memberType,
+      username,
+      name,
+      companyName,
+      businessNumber,
+      birthDate,
+      gender,
+      phoneNumber,
+    });
+
+    if (result.success) {
+      return res.json(result);
+    }
+
+    return res.status(400).json(result);
+  } catch (error) {
+    console.error('비밀번호 재설정 본인 확인 API 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: '비밀번호 재설정 확인에 실패했습니다.',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/reset-password/confirm
+ * 비밀번호 재설정
+ */
+router.post('/reset-password/confirm', async (req: Request, res: Response) => {
+  try {
+    const {
+      memberType,
+      username,
+      name,
+      companyName,
+      businessNumber,
+      birthDate,
+      gender,
+      phoneNumber,
+      newPassword,
+    } = req.body;
+
+    if (!memberType || !username || !phoneNumber || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: '회원 유형, 아이디, 휴대폰 번호, 새 비밀번호를 입력해주세요.',
+      });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: '비밀번호는 최소 8자 이상이어야 합니다.',
+      });
+    }
+
+    const result = await updateMemberPasswordWithIdentity({
+      memberType,
+      username,
+      name,
+      companyName,
+      businessNumber,
+      birthDate,
+      gender,
+      phoneNumber,
+      newPassword,
+    });
+
+    if (result.success) {
+      return res.json(result);
+    }
+
+    return res.status(400).json(result);
+  } catch (error) {
+    console.error('비밀번호 재설정 API 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: '비밀번호 재설정에 실패했습니다.',
     });
   }
 });
