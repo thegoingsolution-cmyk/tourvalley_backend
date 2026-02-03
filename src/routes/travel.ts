@@ -4,6 +4,53 @@ import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkServic
 
 const router = Router();
 
+const LONG_TERM_INSURANCE_TYPES = new Set([
+  '유학/어학연수',
+  '워킹홀리데이',
+  '해외출장/주재원/교환교수',
+]);
+
+const LONG_TERM_RATE_MONTHS = [4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+const addMonthsPreserveDate = (date: Date, months: number): Date => {
+  const year = date.getFullYear();
+  const monthIndex = date.getMonth() + months;
+  const targetYear = year + Math.floor(monthIndex / 12);
+  const targetMonth = ((monthIndex % 12) + 12) % 12;
+  const lastDayOfMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  const day = Math.min(date.getDate(), lastDayOfMonth);
+
+  return new Date(
+    targetYear,
+    targetMonth,
+    day,
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  );
+};
+
+const getRateLookupCriteria = (
+  insuranceType: string,
+  departure: Date,
+  arrival: Date,
+  periodDays: number
+): { unit: 'days' | 'months'; value: number } => {
+  if (!LONG_TERM_INSURANCE_TYPES.has(insuranceType)) {
+    return { unit: 'days', value: periodDays };
+  }
+
+  for (const months of LONG_TERM_RATE_MONTHS) {
+    const boundary = addMonthsPreserveDate(departure, months);
+    if (arrival.getTime() <= boundary.getTime()) {
+      return { unit: 'months', value: months };
+    }
+  }
+
+  return { unit: 'days', value: periodDays };
+};
+
 // 프론트엔드 URL 추론 헬퍼 함수
 const getFrontendUrl = (): string => {
   // 1. FRONTEND_URL 환경 변수가 있으면 사용
@@ -39,8 +86,10 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       departure_date, 
       arrival_date,
       currency_plan,
-      travel_country
+      travel_country,
+      plan_variant
     } = req.body;
+    const planVariant = plan_variant || 'B';
 
     console.log('=== 보험료 계산 시작 ===');
     console.log('입력 파라미터:', {
@@ -68,6 +117,7 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
     const arrival = new Date(arrival_date);
     const diffTime = arrival.getTime() - departure.getTime();
     const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
 
     console.log('기간 계산:', {
       departure: departure.toISOString(),
@@ -117,11 +167,12 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
              AND age = ? 
              AND gender = ? 
              AND has_medical_expense = ? 
+             AND plan_variant = ?
              AND currency = 'EUR'
              AND is_active = 1
            ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
            LIMIT 1`,
-          [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0]
+          [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0, planVariant]
         );
 
         if (eurRows && eurRows.length > 0) {
@@ -139,11 +190,12 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
            AND age = ? 
            AND gender = ? 
            AND has_medical_expense = ? 
+           AND plan_variant = ?
            AND currency = ?
            AND is_active = 1
          ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
          LIMIT 1`,
-        [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0, currency]
+        [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0, planVariant, currency]
       );
 
       console.log('외화 플랜 보험료 조회 결과:', { currency, rows: foreignPremiumRows });
@@ -159,11 +211,12 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
                AND age = ? 
                AND gender = ? 
                AND has_medical_expense = ? 
+               AND plan_variant = ?
                AND currency = 'USD'
                AND is_active = 1
              ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
              LIMIT 1`,
-            [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0]
+            [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0, planVariant]
           );
 
           if (usdRows && usdRows.length > 0) {
@@ -220,7 +273,7 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       });
     } else {
       // 원화 플랜: 기존 로직
-      const queryParams = [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0];
+      const queryParams = [insurance_type, finalPlanType, age, gender, has_medical_expense ? 1 : 0, planVariant];
       console.log('보험료 조회 쿼리 파라미터:', queryParams);
 
       const [premiumRows] = await pool.execute<any[]>(
@@ -231,6 +284,7 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
            AND age = ? 
            AND gender = ? 
            AND has_medical_expense = ? 
+           AND plan_variant = ?
            AND is_active = 1
          ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
          LIMIT 1`,
@@ -255,21 +309,37 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
     let shortTermRate = 100.0; // 기본값 (1년 이상 또는 테이블 최대값 초과 시)
     
     if (periodDays < 365) {
-      console.log('단기요율 조회 (periodDays < 365):', { periodDays, insurance_type });
+      console.log('단기요율 조회 (periodDays < 365):', { periodDays, rateLookup, insurance_type });
       
       // 해당 기간보다 크거나 같은 period_days 중 가장 작은 값 찾기
-      const [rateRows] = await pool.execute<any[]>(
+      let [rateRows] = await pool.execute<any[]>(
         `SELECT rate_percentage, period_days
          FROM short_term_rates 
          WHERE insurance_type = ? 
-           AND period_days >= ? 
+           AND period_unit = ?
+           AND period_value >= ? 
            AND is_active = 1
-         ORDER BY period_days ASC 
+         ORDER BY period_value ASC 
          LIMIT 1`,
-        [insurance_type, periodDays]
+        [insurance_type, rateLookup.unit, rateLookup.value]
       );
 
       console.log('단기요율 조회 결과:', rateRows);
+
+      if ((!rateRows || rateRows.length === 0) && rateLookup.unit === 'months') {
+        [rateRows] = await pool.execute<any[]>(
+          `SELECT rate_percentage, period_days
+           FROM short_term_rates 
+           WHERE insurance_type = ? 
+             AND period_unit = 'days'
+             AND period_value >= ? 
+             AND is_active = 1
+           ORDER BY period_value ASC 
+           LIMIT 1`,
+          [insurance_type, rateLookup.value * 30]
+        );
+        console.log('단기요율(월→일) 폴백 조회 결과:', rateRows);
+      }
 
       if (rateRows && rateRows.length > 0) {
         shortTermRate = parseFloat(rateRows[0].rate_percentage);
@@ -290,10 +360,11 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
          FROM plan_additional_fees 
          WHERE insurance_type = ? 
            AND plan_type = ? 
+           AND plan_variant = ?
            AND is_active = 1
          ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
          LIMIT 1`,
-        [insurance_type, finalPlanType]
+        [insurance_type, finalPlanType, planVariant]
       );
 
       if (additionalFeeRows && additionalFeeRows.length > 0) {
@@ -1404,6 +1475,7 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
     const arrival = new Date(arrival_date);
     const diffTime = arrival.getTime() - departure.getTime();
     const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
 
     if (periodDays <= 0) {
       return res.status(400).json({
@@ -1418,7 +1490,8 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
 
     for (let i = 0; i < insured_persons.length; i++) {
       const insured = insured_persons[i];
-      const { age, gender, plan_type, has_medical_expense } = insured;
+      const { age, gender, plan_type, has_medical_expense, plan_variant } = insured;
+      const planVariant = plan_variant || 'B';
 
       console.log(`피보험자 ${i + 1} 보험료 계산:`, { age, gender, plan_type, has_medical_expense });
 
@@ -1452,10 +1525,11 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
            AND age = ? 
            AND gender = ? 
            AND has_medical_expense = ? 
+           AND plan_variant = ?
            AND is_active = 1
          ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
          LIMIT 1`,
-        [insurance_type, finalPlanType, age, gender, hasMedicalExpenseValue]
+        [insurance_type, finalPlanType, age, gender, hasMedicalExpenseValue, planVariant]
       );
 
       console.log('조회된 보험료 데이터:', premiumRows);
@@ -1486,16 +1560,31 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
       let shortTermRate = 100.0;
       
       if (periodDays < 365) {
-        const [rateRows] = await pool.execute<any[]>(
+        let [rateRows] = await pool.execute<any[]>(
           `SELECT rate_percentage 
            FROM short_term_rates 
            WHERE insurance_type = ? 
-             AND period_days >= ? 
+             AND period_unit = ?
+             AND period_value >= ? 
              AND is_active = 1
-           ORDER BY period_days ASC 
+           ORDER BY period_value ASC 
            LIMIT 1`,
-          [insurance_type, periodDays]
+          [insurance_type, rateLookup.unit, rateLookup.value]
         );
+
+        if ((!rateRows || rateRows.length === 0) && rateLookup.unit === 'months') {
+          [rateRows] = await pool.execute<any[]>(
+            `SELECT rate_percentage 
+             FROM short_term_rates 
+             WHERE insurance_type = ? 
+               AND period_unit = 'days'
+               AND period_value >= ? 
+               AND is_active = 1
+             ORDER BY period_value ASC 
+             LIMIT 1`,
+            [insurance_type, rateLookup.value * 30]
+          );
+        }
 
         if (rateRows && rateRows.length > 0) {
           shortTermRate = parseFloat(rateRows[0].rate_percentage);
@@ -1505,16 +1594,17 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
       // 플랜별 추가 금액 조회 (해외여행보험만 적용)
       let additionalFee = 0;
       if (insurance_type === '해외여행보험') {
-        const [additionalFeeRows] = await pool.execute<any[]>(
-          `SELECT additional_fee 
-           FROM plan_additional_fees 
-           WHERE insurance_type = ? 
-             AND plan_type = ? 
-             AND is_active = 1
-           ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
-           LIMIT 1`,
-          [insurance_type, finalPlanType]
-        );
+      const [additionalFeeRows] = await pool.execute<any[]>(
+        `SELECT additional_fee 
+         FROM plan_additional_fees 
+         WHERE insurance_type = ? 
+           AND plan_type = ? 
+           AND plan_variant = ?
+           AND is_active = 1
+         ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
+         LIMIT 1`,
+        [insurance_type, finalPlanType, planVariant]
+      );
 
         if (additionalFeeRows && additionalFeeRows.length > 0) {
           additionalFee = parseFloat(additionalFeeRows[0].additional_fee);

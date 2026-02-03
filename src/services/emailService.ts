@@ -4,6 +4,53 @@ import pool from '../config/database';
 
 dotenv.config();
 
+const LONG_TERM_INSURANCE_TYPES = new Set([
+  '유학/어학연수',
+  '워킹홀리데이',
+  '해외출장/주재원/교환교수',
+]);
+
+const LONG_TERM_RATE_MONTHS = [4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+const addMonthsPreserveDate = (date: Date, months: number): Date => {
+  const year = date.getFullYear();
+  const monthIndex = date.getMonth() + months;
+  const targetYear = year + Math.floor(monthIndex / 12);
+  const targetMonth = ((monthIndex % 12) + 12) % 12;
+  const lastDayOfMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  const day = Math.min(date.getDate(), lastDayOfMonth);
+
+  return new Date(
+    targetYear,
+    targetMonth,
+    day,
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  );
+};
+
+const getRateLookupCriteria = (
+  insuranceType: string,
+  departure: Date,
+  arrival: Date,
+  periodDays: number
+): { unit: 'days' | 'months'; value: number } => {
+  if (!LONG_TERM_INSURANCE_TYPES.has(insuranceType)) {
+    return { unit: 'days', value: periodDays };
+  }
+
+  for (const months of LONG_TERM_RATE_MONTHS) {
+    const boundary = addMonthsPreserveDate(departure, months);
+    if (arrival.getTime() <= boundary.getTime()) {
+      return { unit: 'months', value: months };
+    }
+  }
+
+  return { unit: 'days', value: periodDays };
+};
+
 // Gmail SMTP 설정
 const createTransporter = () => {
   return nodemailer.createTransport({
@@ -65,6 +112,7 @@ export const calculatePremium = async (
     const arrival = new Date(arrivalDate);
     const diffTime = arrival.getTime() - departure.getTime();
     const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const rateLookup = getRateLookupCriteria(insuranceType, departure, arrival, periodDays);
 
     if (periodDays <= 0) {
       return 0;
@@ -79,6 +127,7 @@ export const calculatePremium = async (
          AND age = ? 
          AND gender = ? 
          AND has_medical_expense = 0
+         AND plan_variant = 'B'
          AND is_active = 1
        ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
        LIMIT 1`,
@@ -94,16 +143,31 @@ export const calculatePremium = async (
     // 단기요율 조회
     let shortTermRate = 100.0;
     if (periodDays < 365) {
-      const [rateRows] = await pool.execute<any[]>(
+      let [rateRows] = await pool.execute<any[]>(
         `SELECT rate_percentage
          FROM short_term_rates 
          WHERE insurance_type = ? 
-           AND period_days >= ? 
+           AND period_unit = ?
+           AND period_value >= ? 
            AND is_active = 1
-         ORDER BY period_days ASC 
+         ORDER BY period_value ASC 
          LIMIT 1`,
-        [insuranceType, periodDays]
+        [insuranceType, rateLookup.unit, rateLookup.value]
       );
+
+      if ((!rateRows || rateRows.length === 0) && rateLookup.unit === 'months') {
+        [rateRows] = await pool.execute<any[]>(
+          `SELECT rate_percentage
+           FROM short_term_rates 
+           WHERE insurance_type = ? 
+             AND period_unit = 'days'
+             AND period_value >= ? 
+             AND is_active = 1
+           ORDER BY period_value ASC 
+           LIMIT 1`,
+          [insuranceType, rateLookup.value * 30]
+        );
+      }
 
       if (rateRows && rateRows.length > 0) {
         shortTermRate = parseFloat(rateRows[0].rate_percentage);
