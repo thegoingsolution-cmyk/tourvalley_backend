@@ -12,6 +12,9 @@ interface AlimTalkVariables {
   travelDestination?: string; // 여행지
   participants?: string; // 가입자 및 인원
   premium?: string; // 보험료
+  cashAmount?: string; // 무사고캐시 적립 금액
+  accumulatedDate?: string; // 적립일자
+  expireDate?: string; // 유효기간
 }
 
 const SIGNUP_TEMPLATE = `#{고객명}고객님. 감사합니다.
@@ -181,6 +184,32 @@ www.tourvalley.net
 
 1599-2541(투어밸리 고객센터 : 월-금 09시-18시)`;
 
+const CASH_ACCUMULATED_TEMPLATE = `#{고객명}고객님.
+
+투어밸리 무사고캐시가 적립되었습니다.
+
+▶적립 무사고캐시 : #{무사고캐시}원
+
+▶적립일자 : #{적립일자}
+
+▶유효기간 : #{유효기간}
+
+감사합니다.
+
+
+투어밸리 홈페이지
+
+www.tourvalley.net
+
+
+문의
+
+1599-2541(투어밸리 고객센터 : 월-금 09시-18시)
+
+팩스 : 02-2261-0098
+
+ ※ 이 메시지는 계약이나 거래관계로 인해 지급된 무사고캐시 안내 메시지입니다.`;
+
 /**
  * 템플릿 타입별 메시지 생성
  */
@@ -213,6 +242,13 @@ export const generateAlimTalkMessage = (
     case 'event_estimate':
       // UE_8396: 행사보험 견적 신청
       return EVENT_ESTIMATE_TEMPLATE.replace(/#\{고객명\}/g, variables.customerName);
+    case 'cash_accumulated':
+      // UE_8118: 무사고캐시 적립
+      return CASH_ACCUMULATED_TEMPLATE
+        .replace(/#\{고객명\}/g, variables.customerName)
+        .replace(/#\{무사고캐시\}/g, variables.cashAmount || '')
+        .replace(/#\{적립일자\}/g, variables.accumulatedDate || '')
+        .replace(/#\{유효기간\}/g, variables.expireDate || '');
 
     default:
       return `${variables.customerName}고객님. 감사합니다.`;

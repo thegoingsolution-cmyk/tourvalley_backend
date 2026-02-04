@@ -32,6 +32,7 @@ const allowedOrigins = [
   'http://localhost:3000',
   'https://www.bzvalley.net',
   'https://bzvalley.net',
+  'https://pay.nicepay.co.kr', // 나이스페이 결제창 → 콜백 리다이렉트 시 Origin
   process.env.CORS_ORIGIN,
 ].filter(Boolean) as string[];
 

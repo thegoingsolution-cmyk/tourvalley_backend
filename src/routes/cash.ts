@@ -1,7 +1,16 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
+import { generateAlimTalkMessage } from '../services/alimtalkMessageGenerator';
+import { sendAlimTalk } from '../services/aligoService';
 
 const router = Router();
+
+const formatDate = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}.${month}.${day}`;
+};
 
 // 무사고캐시 정보 조회 (총액, 소멸예정 캐시)
 router.get('/api/cash/info', async (req: Request, res: Response) => {
@@ -187,7 +196,7 @@ router.get('/api/cash/eligible-contracts', async (req: Request, res: Response) =
 
     // 회원 타입 확인 (개인만 가능)
     const [memberResult] = await pool.execute<any[]>(
-      `SELECT member_type FROM members WHERE id = ?`,
+      `SELECT member_type, name, mobile_phone FROM members WHERE id = ?`,
       [memberId]
     );
 
@@ -337,7 +346,7 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
 
     // 회원 타입 확인
     const [memberResult] = await pool.execute<any[]>(
-      `SELECT member_type FROM members WHERE id = ?`,
+      `SELECT member_type, name, mobile_phone FROM members WHERE id = ?`,
       [memberId]
     );
 
@@ -467,6 +476,39 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
       );
 
       await connection.commit();
+
+      try {
+        const memberName = memberResult[0]?.name || '고객';
+        const receiverPhone = memberResult[0]?.mobile_phone || '';
+        const accumulatedDate = formatDate(new Date());
+        const expireDate = new Date(arrivalDate);
+        expireDate.setFullYear(expireDate.getFullYear() + 1);
+
+        if (receiverPhone) {
+          const message = generateAlimTalkMessage('cash_accumulated', {
+            customerName: memberName,
+            cashAmount: cashAmountRounded.toLocaleString(),
+            accumulatedDate,
+            expireDate: formatDate(expireDate),
+          });
+
+          await sendAlimTalk({
+            receiver: receiverPhone,
+            template_code: 'UE_8118',
+            subject: '무사고캐시 적립',
+            message,
+            receiver_name: memberName,
+            button: [
+              {
+                name: '채널 추가',
+                linkType: 'AC',
+              },
+            ],
+          });
+        }
+      } catch (alimtalkError) {
+        console.error('무사고캐시 적립 알림톡 발송 실패:', alimtalkError);
+      }
 
       res.json({
         success: true,
