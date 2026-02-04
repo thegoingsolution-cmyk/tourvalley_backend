@@ -425,21 +425,33 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
     // 결제 정보 조회 (payments 테이블에서)
     let paymentMethod = contract.payment_method || null;
     let paymentStatus = contract.payment_status || '미결제';
-    
-    // payments 테이블에서 결제 정보 조회 시도
+    let paidAmount: number | null = null; // 실제 결제 금액 (무사고캐시 차감 후)
+    let useAccidentFreeCash = 0; // 무사고캐시 사용액
+
     try {
+      // 최신 결제 행(완료)에서 결제방법, 상태, 실제 결제 금액
       const [payments] = await pool.execute<any[]>(
-        `SELECT payment_method, status 
+        `SELECT payment_method, status, amount 
          FROM payments 
          WHERE contract_id = ? 
          ORDER BY created_at DESC 
          LIMIT 1`,
         [contractId]
       );
-      
+
       if (payments.length > 0) {
         paymentMethod = payments[0].payment_method || paymentMethod;
         paymentStatus = payments[0].status || paymentStatus;
+        paidAmount = payments[0].amount != null ? Number(payments[0].amount) : null;
+      }
+
+      // 무사고캐시 사용액: 계약 등록 시 저장한 첫 결제 행에서 조회
+      const [firstPayments] = await pool.execute<any[]>(
+        `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? ORDER BY id ASC LIMIT 1`,
+        [contractId]
+      );
+      if (firstPayments.length > 0 && firstPayments[0].use_accident_free_cash != null) {
+        useAccidentFreeCash = Math.max(0, Number(firstPayments[0].use_accident_free_cash));
       }
     } catch (error) {
       console.error('결제 정보 조회 오류:', error);
@@ -469,6 +481,8 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       travelParticipants: actualInsuredCount, // 실제 피보험자 수
       paymentMethod: paymentMethod || '무통장입금', // 결제방법
       paymentStatus: paymentStatus || '미결제', // 결제여부
+      useAccidentFreeCash, // 무사고캐시 사용액 (원)
+      paidAmount: paidAmount != null ? paidAmount : contract.total_premium || 0, // 실제 결제 금액 (무사고캐시 차감 후)
       contractorType: contract.contractor_type || '개인', // 계약자 유형
       contractorCompanyName: contract.company_name || null, // 법인명 (법인인 경우)
     };

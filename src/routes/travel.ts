@@ -568,13 +568,14 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
       );
     }
 
-    // 4. 결제 정보 저장
+    // 4. 결제 정보 저장 (use_accident_free_cash: 결제 완료 시 회원 무사고캐시 차감용)
     if (payment) {
+      const useAccidentFreeCash = Math.max(0, Number(payment.use_accident_free_cash) || 0);
       const [paymentResult] = await connection.execute<any>(
         `INSERT INTO payments (
           contract_id, payment_method, payment_sub_method, amount, status,
-          payment_date, depositor_name, bank_name, account_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          payment_date, depositor_name, bank_name, account_number, use_accident_free_cash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
           payment.payment_method,
@@ -585,6 +586,7 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
           payment.payment_sub_method === '무통장입금' ? payment.depositor_name : null,
           payment.payment_sub_method === '무통장입금' ? payment.bank_name : null,
           payment.payment_sub_method === '무통장입금' ? payment.account_number : null,
+          useAccidentFreeCash,
         ]
       );
 
@@ -669,6 +671,26 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
             member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
           ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
           [contract.member_id, mileageAmount, contract_id, newBalance]
+        );
+      }
+
+      // 무사고캐시 사용분 차감 (무통장/수기 등 즉시 완료 시)
+      const useAccidentFreeCash = Math.max(0, Number(payment.use_accident_free_cash) || 0);
+      if (useAccidentFreeCash > 0 && contract.member_id) {
+        const [memberRows] = await connection.execute<any[]>(
+          `SELECT accident_free_cash FROM members WHERE id = ?`,
+          [contract.member_id]
+        );
+        const currentCash = Number(memberRows[0]?.accident_free_cash ?? 0);
+        const newCashBalance = Math.max(0, currentCash - useAccidentFreeCash);
+        await connection.execute(
+          `UPDATE members SET accident_free_cash = ?, updated_at = NOW() WHERE id = ?`,
+          [newCashBalance, contract.member_id]
+        );
+        await connection.execute(
+          `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
+           VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
+          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contract_number}`]
         );
       }
     }
@@ -1058,6 +1080,37 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
             );
           }
 
+          // 무사고캐시 사용분 차감 (계약 등록 시 저장한 use_accident_free_cash)
+          const [pendingPaymentRows] = await connection.execute<any[]>(
+            `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? AND status = '대기' ORDER BY id ASC LIMIT 1`,
+            [contractId]
+          );
+          const useAccidentFreeCash = pendingPaymentRows[0]?.use_accident_free_cash != null
+            ? Math.max(0, Number(pendingPaymentRows[0].use_accident_free_cash))
+            : 0;
+          if (useAccidentFreeCash > 0 && contract.member_id) {
+            const [memberRows] = await connection.execute<any[]>(
+              `SELECT accident_free_cash FROM members WHERE id = ?`,
+              [contract.member_id]
+            );
+            const currentCash = Number(memberRows[0]?.accident_free_cash ?? 0);
+            const newCashBalance = Math.max(0, currentCash - useAccidentFreeCash);
+            await connection.execute(
+              `UPDATE members SET accident_free_cash = ?, updated_at = NOW() WHERE id = ?`,
+              [newCashBalance, contract.member_id]
+            );
+            const [contractNumRows] = await connection.execute<any[]>(
+              `SELECT contract_number FROM travel_contracts WHERE id = ?`,
+              [contractId]
+            );
+            const contractNumber = contractNumRows[0]?.contract_number || String(contractId);
+            await connection.execute(
+              `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
+               VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
+              [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`]
+            );
+          }
+
           try {
             await sendContractCompleteAlimTalk(contractId, '네이버페이');
           } catch (alimtalkError) {
@@ -1402,6 +1455,37 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
               member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
             ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
             [contract.member_id, mileageAmount, contract_id, newBalance]
+          );
+        }
+
+        // 무사고캐시 사용분 차감 (계약 등록 시 저장한 use_accident_free_cash)
+        const [pendingPaymentRows] = await connection.execute<any[]>(
+          `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? AND status = '대기' ORDER BY id ASC LIMIT 1`,
+          [contract_id]
+        );
+        const useAccidentFreeCash = pendingPaymentRows[0]?.use_accident_free_cash != null
+          ? Math.max(0, Number(pendingPaymentRows[0].use_accident_free_cash))
+          : 0;
+        if (useAccidentFreeCash > 0 && contract.member_id) {
+          const [memberRows] = await connection.execute<any[]>(
+            `SELECT accident_free_cash FROM members WHERE id = ?`,
+            [contract.member_id]
+          );
+          const currentCash = Number(memberRows[0]?.accident_free_cash ?? 0);
+          const newCashBalance = Math.max(0, currentCash - useAccidentFreeCash);
+          await connection.execute(
+            `UPDATE members SET accident_free_cash = ?, updated_at = NOW() WHERE id = ?`,
+            [newCashBalance, contract.member_id]
+          );
+          const [contractNumRows] = await connection.execute<any[]>(
+            `SELECT contract_number FROM travel_contracts WHERE id = ?`,
+            [contract_id]
+          );
+          const contractNumber = contractNumRows[0]?.contract_number || String(contract_id);
+          await connection.execute(
+            `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
+             VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
+            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`]
           );
         }
 
