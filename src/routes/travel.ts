@@ -51,6 +51,56 @@ const getRateLookupCriteria = (
   return { unit: 'days', value: periodDays };
 };
 
+const parseBirthDate = (birthDateStr?: string): Date | null => {
+  if (!birthDateStr) return null;
+  const compact = birthDateStr.replace(/[^0-9]/g, '');
+  if (compact.length !== 8) return null;
+  const year = parseInt(compact.substring(0, 4), 10);
+  const month = parseInt(compact.substring(4, 6), 10);
+  const day = parseInt(compact.substring(6, 8), 10);
+  if (Number.isNaN(year) || Number.isNaN(month) || Number.isNaN(day)) return null;
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  const date = new Date(year, month - 1, day);
+  if (date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+};
+
+const calculateAgeDetail = (birthDate: Date, referenceDate: Date) => {
+  if (referenceDate.getTime() < birthDate.getTime()) return null;
+
+  let years = referenceDate.getFullYear() - birthDate.getFullYear();
+  let lastBirthday = new Date(referenceDate.getFullYear(), birthDate.getMonth(), birthDate.getDate());
+  if (referenceDate.getTime() < lastBirthday.getTime()) {
+    years -= 1;
+    lastBirthday = new Date(referenceDate.getFullYear() - 1, birthDate.getMonth(), birthDate.getDate());
+  }
+
+  let months = 0;
+  let cursor = lastBirthday;
+  while (true) {
+    const next = addMonthsPreserveDate(cursor, 1);
+    if (next.getTime() <= referenceDate.getTime()) {
+      months += 1;
+      cursor = next;
+    } else {
+      break;
+    }
+  }
+
+  const diffTime = referenceDate.getTime() - cursor.getTime();
+  const days = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+  const sixMonthsLater = addMonthsPreserveDate(lastBirthday, 6);
+
+  return {
+    years,
+    months,
+    days,
+    lastBirthday: lastBirthday.toISOString(),
+    sixMonthsLater: sixMonthsLater.toISOString(),
+  };
+};
+
 // 프론트엔드 URL 추론 헬퍼 함수
 const getFrontendUrl = (): string => {
   // 1. FRONTEND_URL 환경 변수가 있으면 사용
@@ -87,7 +137,8 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       arrival_date,
       currency_plan,
       travel_country,
-      plan_variant
+      plan_variant,
+      birth_date
     } = req.body;
     const planVariant = plan_variant || 'B';
 
@@ -101,8 +152,21 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       departure_date,
       arrival_date,
       currency_plan,
-      travel_country
+      travel_country,
+      birth_date
     });
+
+    const referenceDate = new Date();
+    const parsedBirthDate = parseBirthDate(birth_date);
+    if (parsedBirthDate) {
+      const ageDetail = calculateAgeDetail(parsedBirthDate, referenceDate);
+      console.log('보험나이 디버그:', {
+        birth_date,
+        reference_date: referenceDate.toISOString(),
+        age_input: age,
+        age_detail: ageDetail,
+      });
+    }
 
     // 필수 파라미터 검증
     if (!insurance_type || age === undefined || !gender || !plan_type || !departure_date || !arrival_date) {
