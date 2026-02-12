@@ -104,8 +104,8 @@ export const calculatePremium = async (
   arrivalDate: string
 ): Promise<number> => {
   try {
-    // 15세 미만일 경우 어린이플랜으로 강제 변경
-    const finalPlanType = age < 15 ? '어린이플랜' : planType;
+    // 요청된 플랜 타입 그대로 사용 (어린이플랜2 등 유지)
+    const finalPlanType = planType;
 
     // 보험기간 계산 (일수)
     const departure = new Date(departureDate);
@@ -260,7 +260,7 @@ export const sendEstimateEmail = async (data: EstimateEmailData): Promise<{ succ
 
     for (const participant of data.participants) {
       const age = calculateAge(participant.birth_date);
-      const planType = age < 15 ? '어린이플랜' : defaultPlanType;
+      const planType = defaultPlanType;
       const premium = await calculatePremium(
         insuranceType,
         age,

@@ -240,7 +240,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
           gender,
           0,
           0,
-          age < 15 ? '어린이플랜' : '실속플랜',
+          '실속플랜',
           0,
           sequence,
         ]
@@ -371,7 +371,7 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
         }
 
         const age = birthDate ? calculateAge(birthDate) : 0;
-        const planType = companion.plan_type || (age < 15 ? '어린이플랜' : '실속플랜');
+        const planType = companion.plan_type || '실속플랜';
         
         // 보험료가 0이면 계산
         let premium = parseFloat(companion.premium) || 0;
@@ -423,7 +423,7 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
       const participantsWithPremium = [];
       for (const participant of participants) {
         const age = calculateAge(participant.birth_date);
-        const planType = age < 15 ? '어린이플랜' : '실속플랜';
+        const planType = '실속플랜';
         const premium = await calculatePremium(
           insuranceType,
           age,

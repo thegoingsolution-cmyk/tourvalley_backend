@@ -21,7 +21,7 @@ const formatInsuranceDateTime = (value: any): string => {
 const shouldSendContractCompleteAlimTalk = (paymentMethod?: string | null, paymentSubMethod?: string | null) => {
   const method = (paymentMethod || '').trim();
   const subMethod = (paymentSubMethod || '').trim();
-  const excludedMethods = ['수기카드', '무통장', '무통장입금', '가상계좌'];
+  const excludedMethods = ['수기카드', '무통장', '무통장입금'];
 
   if (excludedMethods.includes(method)) {
     return false;

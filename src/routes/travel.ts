@@ -124,6 +124,119 @@ const getFrontendUrl = (): string => {
     : 'http://localhost:3000';
 };
 
+const isReceiptUrl = (value: string) => {
+  return value.startsWith('http://') || value.startsWith('https://');
+};
+
+const extractReceiptUrl = (responseData: any): string | null => {
+  if (!responseData) {
+    return null;
+  }
+
+  const knownKeys = new Set([
+    'receipturl',
+    'receipt_url',
+    'cashreceipturl',
+    'cash_receipt_url',
+    'cardreceipturl',
+    'card_receipt_url',
+  ]);
+
+  const findUrl = (value: any, keyHint?: string): string | null => {
+    if (!value) {
+      return null;
+    }
+
+    if (typeof value === 'string') {
+      if (keyHint && keyHint.toLowerCase().includes('receipt') && isReceiptUrl(value)) {
+        return value;
+      }
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findUrl(item, keyHint);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    if (typeof value === 'object') {
+      const entries = Object.entries(value);
+      for (const [key, nestedValue] of entries) {
+        if (knownKeys.has(key.toLowerCase()) && typeof nestedValue === 'string' && isReceiptUrl(nestedValue)) {
+          return nestedValue;
+        }
+      }
+      for (const [key, nestedValue] of entries) {
+        if (key.toLowerCase().includes('receipt') && typeof nestedValue === 'string' && isReceiptUrl(nestedValue)) {
+          return nestedValue;
+        }
+        const found = findUrl(nestedValue, key);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  };
+
+  return findUrl(responseData);
+};
+
+const fetchNaverPayReceiptUrl = async ({
+  paymentId,
+  clientId,
+  clientSecret,
+  chainId,
+}: {
+  paymentId: string;
+  clientId: string;
+  clientSecret: string;
+  chainId?: string;
+}): Promise<string | null> => {
+  const receiptApiUrl = process.env.NAVER_PAY_RECEIPT_API_URL;
+  if (!receiptApiUrl) {
+    return null;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const response = await fetch(receiptApiUrl, {
+      method: 'POST',
+      headers: {
+        'X-Naver-Client-Id': clientId,
+        'X-Naver-Client-Secret': clientSecret,
+        'X-NaverPay-Chain-Id': chainId || '',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: `paymentId=${encodeURIComponent(paymentId)}`,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      console.warn('네이버 페이 영수증 조회 실패:', responseText);
+      return null;
+    }
+
+    let data: any = null;
+    try {
+      data = JSON.parse(responseText);
+    } catch (parseError) {
+      console.warn('네이버 페이 영수증 응답 JSON 파싱 실패:', parseError);
+      return null;
+    }
+
+    return extractReceiptUrl(data);
+  } catch (error) {
+    console.error('네이버 페이 영수증 조회 오류:', error);
+    return null;
+  }
+};
+
 // 보험료 계산 (국내여행보험용)
 router.post('/api/travel/calculate-premium', async (req: Request, res: Response) => {
   try {
@@ -197,8 +310,8 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       });
     }
 
-    // 15세 미만일 경우 어린이플랜으로 강제 변경
-    const finalPlanType = age < 15 ? '어린이플랜' : plan_type;
+    // 요청된 플랜 타입 그대로 사용 (어린이플랜2 등 유지)
+    const finalPlanType = plan_type;
     console.log('플랜 타입:', { original: plan_type, final: finalPlanType, age });
 
     let annualPremium: number;
@@ -568,12 +681,12 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         contractor.contractor_type || '개인',
         contractor.name || null,
         contractor.resident_number || null,
-        contractor.mobile_phone || null,
+        contractor.mobile_phone || contractor.phone || null,
         contractor.email || null,
         contractor.company_name || null,
         contractor.business_number || null,
         contractor.contact_person || null,
-        contractor.phone || null,
+        contractor.phone || contractor.mobile_phone || null,
       ]
     );
 
@@ -1095,18 +1208,28 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
             [contractId]
           );
 
+          let receiptUrl = extractReceiptUrl(naverPayResponse);
+          if (!receiptUrl && paymentId) {
+            receiptUrl = await fetchNaverPayReceiptUrl({
+              paymentId: paymentId as string,
+              clientId: naverPayClientId,
+              clientSecret: naverPayClientSecret,
+              chainId: naverPayChainId,
+            });
+          }
           // 결제 정보 저장
           await connection.execute(
             `INSERT INTO payments (
               contract_id, payment_method, amount, status, payment_date,
-              payment_number, pg_transaction_id, pg_response
-            ) VALUES (?, '네이버페이', ?, '완료', NOW(), ?, ?, ?)`,
+              payment_number, pg_transaction_id, pg_response, receipt_url
+            ) VALUES (?, '네이버페이', ?, '완료', NOW(), ?, ?, ?, ?)`,
             [
               contractId,
               totalPayAmount,
               merchantPayKey,
               paymentId,
               JSON.stringify(naverPayResponse),
+              receiptUrl,
             ]
           );
 
@@ -1475,18 +1598,20 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
           [contract_id]
         );
 
+        const receiptUrl = extractReceiptUrl(approveResponse);
         // 결제 정보 저장
         await connection.execute(
           `INSERT INTO payments (
             contract_id, payment_method, amount, status, payment_date,
-            payment_number, pg_transaction_id, pg_response
-          ) VALUES (?, '카카오페이', ?, '완료', NOW(), ?, ?, ?)`,
+            payment_number, pg_transaction_id, pg_response, receipt_url
+          ) VALUES (?, '카카오페이', ?, '완료', NOW(), ?, ?, ?, ?)`,
           [
             contract_id,
             paidAmount,
             partner_order_id,
             tid,
             JSON.stringify(approveResponse),
+            receiptUrl,
           ]
         );
 
@@ -1585,6 +1710,256 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
   }
 });
 
+// 단체/개인 공통: 조건에 맞는 플랜 목록 조회
+router.post('/api/travel/available-plans', async (req: Request, res: Response) => {
+  try {
+    const {
+      insurance_type,
+      age,
+      gender,
+      plan_variant = 'B',
+      has_medical_expense = 1,
+      include_foreign_currency = false,
+    } = req.body;
+
+    if (!insurance_type || age === undefined || !gender) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    const hasMedicalExpenseValue = has_medical_expense ? 1 : 0;
+    const params = [insurance_type, age, gender, hasMedicalExpenseValue, plan_variant];
+
+    const [premiumRows] = await pool.execute<any[]>(
+      `SELECT DISTINCT plan_type
+       FROM premium_rates
+       WHERE insurance_type = ?
+         AND age = ?
+         AND gender = ?
+         AND has_medical_expense = ?
+         AND plan_variant = ?
+         AND is_active = 1`,
+      params
+    );
+
+    let planTypes = (premiumRows || []).map(row => row.plan_type);
+
+    if (include_foreign_currency) {
+      const [foreignRows] = await pool.execute<any[]>(
+        `SELECT DISTINCT plan_type
+         FROM foreign_currency_premium_rates
+         WHERE insurance_type = ?
+           AND age = ?
+           AND gender = ?
+           AND has_medical_expense = ?
+           AND plan_variant = ?
+           AND is_active = 1`,
+        params
+      );
+      const foreignPlanTypes = (foreignRows || []).map(row => row.plan_type);
+      planTypes = planTypes.concat(foreignPlanTypes);
+    }
+
+    const uniquePlanTypes = Array.from(new Set(planTypes));
+
+    return res.json({
+      success: true,
+      plan_types: uniquePlanTypes,
+    });
+  } catch (error) {
+    console.error('플랜 목록 조회 실패:', error);
+    return res.status(500).json({
+      success: false,
+      message: '플랜 목록 조회 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 플랜 보장내용 조회
+router.post('/api/travel/plan-coverages', async (req: Request, res: Response) => {
+  try {
+    const { insurance_type, plan_types, currency_plan, has_medical_expense } = req.body;
+
+    if (!insurance_type || !Array.isArray(plan_types) || plan_types.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    const normalizeWorkingHolidayPlan = (planType: string) => {
+      if (planType === '워킹홀리데이실속플랜') return '실속플랜';
+      if (planType === '워킹홀리데이표준플랜') return '표준플랜';
+      if (planType === '워킹홀리데이(유로화플랜)') return '고급플랜';
+      return planType;
+    };
+
+    const medicalExpenseType =
+      has_medical_expense === undefined || has_medical_expense ? '실손' : '비실손';
+
+    const resolveCurrencyPlan = (planType: string) => {
+      if (planType === '워킹홀리데이(유로화플랜)') {
+        return '외화';
+      }
+      if (insurance_type === '워킹홀리데이') {
+        return '원화';
+      }
+      if (insurance_type === '유학/어학연수' || insurance_type === '해외출장/주재원/교환교수') {
+        return currency_plan || '원화';
+      }
+      return null;
+    };
+
+    const fetchPlanCoveragesFromDb = async (
+      insuranceType: string,
+      planType: string,
+      planCurrency: string | null
+    ) => {
+      const [rows] = await pool.execute<any[]>(
+        `SELECT label_text, amount_text
+           FROM plan_coverages
+          WHERE insurance_type = ?
+            AND plan_type = ?
+            AND medical_expense_type = ?
+            AND (currency_plan = ? OR (currency_plan IS NULL AND ? IS NULL))
+            AND is_active = 1
+            AND (effective_from_date IS NULL OR effective_from_date <= CURRENT_DATE())
+            AND (effective_to_date IS NULL OR effective_to_date >= CURRENT_DATE())
+          ORDER BY display_order ASC, id ASC`,
+        [insuranceType, planType, medicalExpenseType, planCurrency, planCurrency]
+      );
+      return rows.map((row) => ({
+        label: row.label_text,
+        amount: row.amount_text,
+      }));
+    };
+
+    const coverages: Record<string, { label: string; amount: string }[]> = {};
+    for (const planType of plan_types) {
+      const basePlanType = normalizeWorkingHolidayPlan(planType);
+      const planCurrency = resolveCurrencyPlan(planType);
+      const dbCoverages = await fetchPlanCoveragesFromDb(insurance_type, basePlanType, planCurrency);
+
+      if (dbCoverages.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: `보장내용이 DB에 없습니다. (insurance_type=${insurance_type}, plan_type=${basePlanType}, currency_plan=${planCurrency ?? 'NULL'})`,
+        });
+      }
+
+      coverages[planType] = dbCoverages;
+    }
+
+    return res.json({ success: true, coverages });
+  } catch (error) {
+    console.error('플랜 보장내용 조회 실패:', error);
+    return res.status(500).json({
+      success: false,
+      message: '플랜 보장내용 조회 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 보장 상세보기 데이터 조회
+router.post('/api/travel/coverage-details', async (req: Request, res: Response) => {
+  try {
+    const { insurance_type, plan_type, is_medical_expense, currency_plan, plan_variant } = req.body;
+
+    if (!insurance_type || !plan_type) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    const needsMedicalExpenseDistinction = insurance_type === '국내여행보험' || insurance_type === '해외여행보험';
+    const needsCurrencyPlanDistinction =
+      insurance_type === '유학/어학연수' || insurance_type === '해외출장/주재원/교환교수';
+
+    const medicalExpenseType = needsMedicalExpenseDistinction
+      ? (is_medical_expense === false ? '비실손' : '실손')
+      : null;
+
+    const currencyPlanType = needsCurrencyPlanDistinction
+      ? (currency_plan || '원화플랜')
+      : null;
+
+    const planVariant = plan_variant || 'B';
+
+    const [sectionRows] = await pool.execute<any[]>(
+      `SELECT id, section_title, help_url
+         FROM coverage_detail_sections
+        WHERE insurance_type = ?
+          AND plan_type = ?
+          AND plan_variant = ?
+          AND (medical_expense_type = ? OR (medical_expense_type IS NULL AND ? IS NULL))
+          AND (currency_plan = ? OR (currency_plan IS NULL AND ? IS NULL))
+          AND is_active = 1
+          AND (effective_from_date IS NULL OR effective_from_date <= CURRENT_DATE())
+          AND (effective_to_date IS NULL OR effective_to_date >= CURRENT_DATE())
+        ORDER BY display_order ASC, id ASC`,
+      [
+        insurance_type,
+        plan_type,
+        planVariant,
+        medicalExpenseType,
+        medicalExpenseType,
+        currencyPlanType,
+        currencyPlanType,
+      ]
+    );
+
+    if (sectionRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '보장 상세 데이터가 없습니다.',
+      });
+    }
+
+    const sectionIds = sectionRows.map((row) => row.id);
+    const placeholders = sectionIds.map(() => '?').join(', ');
+    const [itemRows] = await pool.execute<any[]>(
+      `SELECT section_id, item_label, amount_text, note
+         FROM coverage_detail_items
+        WHERE section_id IN (${placeholders})
+          AND is_active = 1
+        ORDER BY display_order ASC, id ASC`,
+      sectionIds
+    );
+
+    const itemsBySection = new Map<number, { label: string; amount: string; note?: string }[]>();
+    itemRows.forEach((row) => {
+      const items = itemsBySection.get(row.section_id) || [];
+      items.push({
+        label: row.item_label,
+        amount: row.amount_text,
+        note: row.note || undefined,
+      });
+      itemsBySection.set(row.section_id, items);
+    });
+
+    const sections = sectionRows.map((row) => ({
+      title: row.section_title,
+      helpUrl: row.help_url,
+      items: itemsBySection.get(row.id) || [],
+    }));
+
+    return res.json({
+      success: true,
+      planName: plan_type,
+      sections,
+    });
+  } catch (error) {
+    console.error('보장 상세 조회 실패:', error);
+    return res.status(500).json({
+      success: false,
+      message: '보장 상세 조회 중 오류가 발생했습니다.',
+    });
+  }
+});
+
 // 단체여행보험 보험료 계산 (법인/단체용)
 router.post('/api/travel/calculate-group-premium', async (req: Request, res: Response) => {
   try {
@@ -1651,8 +2026,10 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
         });
       }
 
-      // 15세 미만일 경우 어린이플랜으로 강제 변경
-      const finalPlanType = age < 15 ? '어린이플랜' : plan_type;
+      // 나이에 따라 DB plan_type 보정: 71세 이상 어르신플랜1/2
+      const finalPlanType = age >= 71
+        ? (plan_type === '어르신플랜2' ? '어르신플랜2' : '어르신플랜1')
+        : plan_type;
       const hasMedicalExpenseValue = has_medical_expense ? 1 : 0;
 
       console.log('보험료 조회 조건:', {
