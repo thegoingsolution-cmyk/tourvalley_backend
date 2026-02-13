@@ -184,57 +184,41 @@ const extractReceiptUrl = (responseData: any): string | null => {
   return findUrl(responseData);
 };
 
-const fetchNaverPayReceiptUrl = async ({
-  paymentId,
-  clientId,
-  clientSecret,
-  chainId,
-}: {
-  paymentId: string;
-  clientId: string;
-  clientSecret: string;
-  chainId?: string;
-}): Promise<string | null> => {
-  const receiptApiUrl = process.env.NAVER_PAY_RECEIPT_API_URL;
-  if (!receiptApiUrl) {
+/** 네이버페이 영수증 미리보기 기준 URL (개발/상용 분기) */
+const getNaverPayReceiptBaseUrl = (): string => {
+  const override = process.env.NAVER_PAY_RECEIPT_BASE_URL;
+  if (override) return override.replace(/\/$/, '');
+  const env = process.env.NAVER_PAY_ENV;
+  const isDev = env === 'dev' || env === 'development';
+  return isDev
+    ? 'https://test-pay.naver.com/receipts/preview/card'
+    : 'https://pay.naver.com/receipts/preview/card';
+};
+
+/** 네이버페이 결제 승인 응답에서 영수증 미리보기 URL 생성 (API 호출 없이 paymentId, payHistId로 조합) */
+const buildNaverPayReceiptUrl = (naverPayResponse: any, paymentId: string): string | null => {
+  const detail = naverPayResponse?.body?.detail || naverPayResponse?.detail || {};
+  const payHistId = detail.payHistId;
+  if (!paymentId || !payHistId) {
     return null;
   }
+  const params = new URLSearchParams({
+    svcInfType: 'PD',
+    paymentId,
+    tid: payHistId,
+  });
+  return `${getNaverPayReceiptBaseUrl()}?${params.toString()}`;
+};
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-    const response = await fetch(receiptApiUrl, {
-      method: 'POST',
-      headers: {
-        'X-Naver-Client-Id': clientId,
-        'X-Naver-Client-Secret': clientSecret,
-        'X-NaverPay-Chain-Id': chainId || '',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: `paymentId=${encodeURIComponent(paymentId)}`,
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    const responseText = await response.text();
-    if (!response.ok) {
-      console.warn('네이버 페이 영수증 조회 실패:', responseText);
-      return null;
-    }
-
-    let data: any = null;
-    try {
-      data = JSON.parse(responseText);
-    } catch (parseError) {
-      console.warn('네이버 페이 영수증 응답 JSON 파싱 실패:', parseError);
-      return null;
-    }
-
-    return extractReceiptUrl(data);
-  } catch (error) {
-    console.error('네이버 페이 영수증 조회 오류:', error);
-    return null;
-  }
+/** 카카오페이 영수증 URL 생성. KAKAO_PAY_RECEIPT_BASE_URL 설정 시에만 생성 (공식 웹 영수증 URL 미제공, 앱 내 결제내역에서 확인) */
+const buildKakaoPayReceiptUrl = (approveResponse: any): string | null => {
+  const base = process.env.KAKAO_PAY_RECEIPT_BASE_URL?.trim();
+  if (!base) return null;
+  const tid = approveResponse?.tid;
+  if (!tid) return null;
+  const params = new URLSearchParams({ tid });
+  if (approveResponse?.cid) params.set('cid', approveResponse.cid);
+  return `${base.replace(/\/$/, '')}?${params.toString()}`;
 };
 
 // 보험료 계산 (국내여행보험용)
@@ -813,13 +797,8 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         );
         
         console.log('payment_details 저장 완료');
-      } else {
-        console.log('payment_details 저장 조건 불일치:', {
-          payment_id,
-          payment_sub_method: payment.payment_sub_method,
-          condition: payment_id && (payment.payment_sub_method === '수기카드' || payment.payment_sub_method === '무통장입금')
-        });
       }
+      // 나이스페이/네이버페이/카카오페이 등 PG 결제는 payment_sub_method가 null → payment_details 미저장(정상)
     }
 
     // 5. 마일리지 적립 (결제 완료인 경우)
@@ -1208,14 +1187,10 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
             [contractId]
           );
 
+          // 영수증 URL: apply 응답에 있으면 추출, 없으면 paymentId·payHistId로 미리보기 URL 생성
           let receiptUrl = extractReceiptUrl(naverPayResponse);
           if (!receiptUrl && paymentId) {
-            receiptUrl = await fetchNaverPayReceiptUrl({
-              paymentId: paymentId as string,
-              clientId: naverPayClientId,
-              clientSecret: naverPayClientSecret,
-              chainId: naverPayChainId,
-            });
+            receiptUrl = buildNaverPayReceiptUrl(naverPayResponse, paymentId as string);
           }
           // 결제 정보 저장
           await connection.execute(
@@ -1598,7 +1573,11 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
           [contract_id]
         );
 
-        const receiptUrl = extractReceiptUrl(approveResponse);
+        // 영수증 URL: 승인 응답에 있으면 추출, 없으면 tid로 URL 생성
+        let receiptUrl = extractReceiptUrl(approveResponse);
+        if (!receiptUrl) {
+          receiptUrl = buildKakaoPayReceiptUrl(approveResponse);
+        }
         // 결제 정보 저장
         await connection.execute(
           `INSERT INTO payments (

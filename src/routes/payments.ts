@@ -134,6 +134,42 @@ const extractReceiptUrl = (responseData: any): string | null => {
   return findUrl(responseData);
 };
 
+/** 네이버페이 영수증 미리보기 기준 URL (개발/상용 분기) */
+const getNaverPayReceiptBaseUrl = (): string => {
+  const override = process.env.NAVER_PAY_RECEIPT_BASE_URL;
+  if (override) return override.replace(/\/$/, '');
+  const env = process.env.NAVER_PAY_ENV;
+  const isDev = env === 'dev' || env === 'development';
+  return isDev
+    ? 'https://test-pay.naver.com/receipts/preview/card'
+    : 'https://pay.naver.com/receipts/preview/card';
+};
+
+/** 네이버페이 결제 승인 응답에서 영수증 미리보기 URL 생성 */
+const buildNaverPayReceiptUrl = (naverPayResponse: any, paymentId: string): string | null => {
+  const detail = naverPayResponse?.body?.detail || naverPayResponse?.detail || {};
+  const payHistId = detail.payHistId;
+  if (!paymentId || !payHistId) {
+    return null;
+  }
+  const params = new URLSearchParams({
+    svcInfType: 'PD',
+    paymentId,
+    tid: payHistId,
+  });
+  return `${getNaverPayReceiptBaseUrl()}?${params.toString()}`;
+};
+
+/** 카카오페이 영수증 URL 생성. KAKAO_PAY_RECEIPT_BASE_URL 설정 시에만 사용 (공식 웹 영수증 URL 미제공) */
+const buildKakaoPayReceiptUrl = (approveResponse: any): string | null => {
+  const base = process.env.KAKAO_PAY_RECEIPT_BASE_URL?.trim();
+  if (!base) return null;
+  const tid = approveResponse?.tid;
+  if (!tid) return null;
+  const params = new URLSearchParams({ tid });
+  if (approveResponse?.cid) params.set('cid', approveResponse.cid);
+  return `${base.replace(/\/$/, '')}?${params.toString()}`;
+};
 
 // 나이스페이먼츠 결제 요청 (결제창 호출용 파라미터 생성)
 router.post('/api/payments/nicepay/request', async (req: Request, res: Response) => {
@@ -244,6 +280,18 @@ router.get('/api/payments/receipt', async (req: Request, res: Response) => {
       }
 
       receiptUrl = extractReceiptUrl(pgResponse);
+
+      // 네이버페이: apply 응답에는 영수증 URL이 없으므로 paymentId·payHistId로 미리보기 URL 생성
+      if (!receiptUrl && payment.payment_method === '네이버페이' && pgResponse) {
+        const paymentId = pgResponse?.body?.detail?.paymentId ?? pgResponse?.body?.paymentId ?? pgResponse?.detail?.paymentId;
+        if (paymentId) {
+          receiptUrl = buildNaverPayReceiptUrl(pgResponse, paymentId);
+        }
+      }
+      // 카카오페이: 승인 응답에 영수증 URL이 없으므로 tid로 URL 생성
+      if (!receiptUrl && payment.payment_method === '카카오페이' && pgResponse) {
+        receiptUrl = buildKakaoPayReceiptUrl(pgResponse);
+      }
     }
 
     if (!receiptUrl) {

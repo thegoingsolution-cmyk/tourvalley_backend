@@ -27,11 +27,13 @@ NICEPAY_SECRET_KEY=26dfd98737894b63ad2761bba56de241
 NAVER_PAY_CLIENT_ID=HN3GGCMDdTgGUfl0kFCo
 NAVER_PAY_CLIENT_SECRET=your_naverpay_client_secret  # 실제 시크릿 키로 변경 필요
 NAVER_PAY_CHAIN_ID=Y1dub1pDaDgyM0w
-NAVER_PAY_ENV=dev  # dev 또는 production
+NAVER_PAY_ENV=dev  # dev 또는 production (영수증 URL도 이 값으로 개발/상용 분기)
+# NAVER_PAY_RECEIPT_BASE_URL=https://test-pay.naver.com/receipts/preview/card  # 선택: 영수증 미리보기 기준 URL 덮어쓰기
 
 # 카카오페이 설정 (계정 발급 후 추가)
 # KAKAOPAY_ADMIN_KEY=your_kakaopay_admin_key
 # KAKAOPAY_CID=your_kakaopay_cid
+# KAKAO_PAY_RECEIPT_BASE_URL=  # 카카오페이 공식 웹 영수증 URL 미제공. 유효한 URL을 카카오에 문의 후 설정 시 tid 쿼리 자동 추가. 미설정 시 receipt_url 비움(앱 내 결제내역에서 확인 안내)
 
 # 프론트엔드 URL
 FRONTEND_URL=http://localhost:3000
