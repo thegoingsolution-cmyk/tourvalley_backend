@@ -426,12 +426,18 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
     let paymentMethod = contract.payment_method || null;
     let paymentStatus = contract.payment_status || '미결제';
     let paidAmount: number | null = null; // 실제 결제 금액 (무사고캐시 차감 후)
+    let paymentSubMethod: string | null = null;
+    let paymentDate: string | null = null;
+    let depositorName: string | null = null;
+    let bankName: string | null = null;
+    let accountNumber: string | null = null;
+    let receiptUrl: string | null = null;
     let useAccidentFreeCash = 0; // 무사고캐시 사용액
 
     try {
       // 최신 결제 행(완료)에서 결제방법, 상태, 실제 결제 금액
       const [payments] = await pool.execute<any[]>(
-        `SELECT payment_method, status, amount 
+        `SELECT payment_method, payment_sub_method, status, amount, payment_date, depositor_name, bank_name, account_number, receipt_url
          FROM payments 
          WHERE contract_id = ? 
          ORDER BY created_at DESC 
@@ -441,8 +447,14 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
 
       if (payments.length > 0) {
         paymentMethod = payments[0].payment_method || paymentMethod;
+        paymentSubMethod = payments[0].payment_sub_method || null;
         paymentStatus = payments[0].status || paymentStatus;
         paidAmount = payments[0].amount != null ? Number(payments[0].amount) : null;
+        paymentDate = payments[0].payment_date || null;
+        depositorName = payments[0].depositor_name || null;
+        bankName = payments[0].bank_name || null;
+        accountNumber = payments[0].account_number || null;
+        receiptUrl = payments[0].receipt_url || null;
       }
 
       // 무사고캐시 사용액: 계약 등록 시 저장한 첫 결제 행에서 조회
@@ -480,9 +492,16 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       travelPurpose: contract.travel_purpose || null,
       travelParticipants: actualInsuredCount, // 실제 피보험자 수
       paymentMethod: paymentMethod || '무통장입금', // 결제방법
+      paymentSubMethod, // 결제 세부 방법
       paymentStatus: paymentStatus || '미결제', // 결제여부
       useAccidentFreeCash, // 무사고캐시 사용액 (원)
       paidAmount: paidAmount != null ? paidAmount : contract.total_premium || 0, // 실제 결제 금액 (무사고캐시 차감 후)
+      paymentDate, // 결제일시
+      depositorName, // 입금자명 (무통장입금)
+      bankName, // 입금은행 (무통장입금)
+      accountNumber, // 입금계좌번호 (무통장입금)
+      receiptUrl, // 영수증 URL
+      subscriptionCertificateUrl: contract.subscription_certificate_url || null, // 증권 파일 경로
       contractorType: contract.contractor_type || '개인', // 계약자 유형
       contractorCompanyName: contract.company_name || null, // 법인명 (법인인 경우)
     };
