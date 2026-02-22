@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
+import { sendSms } from '../services/aligoService';
 
 const router = Router();
 
@@ -852,6 +853,41 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     }
 
     await connection.commit();
+
+    if (payment?.payment_sub_method === '무통장입금') {
+      const receiverPhone = contractor?.mobile_phone || contractor?.phone;
+      if (receiverPhone) {
+        const amountToPay = payment.amount || contract.total_premium || 0;
+        const expectedDate = payment.expected_deposit_date;
+        const expectedDateText = expectedDate
+          ? `${expectedDate.substring(0, 4)}년 ${expectedDate.substring(5, 7)}월 ${expectedDate.substring(8, 10)}일`
+          : '가능한 빠른 시일 내';
+        const bankName = payment.bank_name || '';
+        const accountNumber = payment.account_number || '';
+        const accountHolderName = '빨주노초파남보';
+        const message = `[투어밸리] 무통장입금 안내
+
+보험료가 정상적으로 접수되었습니다.
+아래 계좌로 ${expectedDateText}까지 보험료를 입금해 주세요.
+
+은행: ${bankName}
+계좌번호: ${accountNumber}
+예금주: ${accountHolderName}
+입금금액: ${Number(amountToPay).toLocaleString()}원
+
+입금 확인 후 보험 가입이 완료됩니다.`;
+
+        try {
+          await sendSms({
+            receiver: receiverPhone,
+            message,
+            title: '[투어밸리] 무통장입금 안내',
+          });
+        } catch (smsError) {
+          console.error('무통장입금 안내 LMS 발송 실패:', smsError);
+        }
+      }
+    }
 
     res.json({
       success: true,
