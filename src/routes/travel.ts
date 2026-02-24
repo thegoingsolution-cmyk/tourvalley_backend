@@ -615,6 +615,64 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     await connection.beginTransaction();
 
     const { contract, contractor, insured_persons, companions, payment } = req.body;
+    const COUNTRY_NAME_ALIASES: Record<string, string> = {
+      포르투갈: '포르투칼',
+      남아프리카공화국: '남아공화국',
+      파푸아뉴기니: '파푸아뉴기니아',
+      터키: '터어키',
+      코트디부아르: '코트디브와르',
+    };
+
+    const normalizeCountryName = (value?: string | null) => {
+      if (!value) return '';
+      const stripped = value.replace('(가입불가)', '').trim();
+      return COUNTRY_NAME_ALIASES[stripped] || stripped;
+    };
+
+    let resolvedTravelRegion: string | null = contract?.travel_region || null;
+    if (resolvedTravelRegion === '해외') {
+      resolvedTravelRegion = null;
+    }
+
+    if (!resolvedTravelRegion && contract?.travel_country) {
+      const normalizedCountry = normalizeCountryName(contract.travel_country);
+      try {
+        const insuranceType = contract?.insurance_type;
+        let rows: any[] = [];
+        if (insuranceType) {
+          const [filteredRows] = await connection.execute<any[]>(
+            `SELECT region_name
+               FROM travel_regions
+              WHERE is_active = 1
+                AND country_name = ?
+                AND JSON_CONTAINS(insurance_types, ?)
+              ORDER BY display_order, id
+              LIMIT 1`,
+            [normalizedCountry, JSON.stringify(insuranceType)]
+          );
+          rows = filteredRows;
+        }
+
+        if (!rows.length) {
+          const [fallbackRows] = await connection.execute<any[]>(
+            `SELECT region_name
+               FROM travel_regions
+              WHERE is_active = 1
+                AND country_name = ?
+              ORDER BY display_order, id
+              LIMIT 1`,
+            [normalizedCountry]
+          );
+          rows = fallbackRows;
+        }
+
+        if (rows.length > 0 && rows[0]?.region_name) {
+          resolvedTravelRegion = rows[0].region_name;
+        }
+      } catch (error) {
+        console.error('Failed to resolve travel region:', error);
+      }
+    }
 
     // 수기카드 데이터 확인용 로그
     if (payment?.payment_sub_method === '수기카드') {
@@ -639,7 +697,7 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         contract.duration_months,
         contract.duration_days,
         contract.arrival_date,
-        contract.travel_region || null,
+        resolvedTravelRegion,
         contract.travel_country || null,
         contract.travel_purpose,
         contract.travel_participants,

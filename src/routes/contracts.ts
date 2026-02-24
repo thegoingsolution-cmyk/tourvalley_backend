@@ -19,7 +19,7 @@ const verificationStore: Map<string, VerificationData> = new Map();
 // 가입/신청 내역 조회
 router.get('/api/contracts/list', async (req: Request, res: Response) => {
   try {
-    const { member_id, inyear = '1', block_type = 'C', str_cur_page = '1' } = req.query;
+    const { member_id, inyear = '1', block_type = 'C', str_cur_page = '1', str_page_size = '10' } = req.query;
 
     if (!member_id) {
       return res.status(400).json({
@@ -31,7 +31,8 @@ router.get('/api/contracts/list', async (req: Request, res: Response) => {
     const memberId = parseInt(member_id as string, 10);
     const inYear = parseInt(inyear as string, 10);
     const currentPage = parseInt(str_cur_page as string, 10);
-    const pageSize = 10; // 페이지당 항목 수
+    const pageSizeRaw = parseInt(str_page_size as string, 10);
+    const pageSize = Number.isFinite(pageSizeRaw) && pageSizeRaw > 0 ? pageSizeRaw : 10; // 페이지당 항목 수
 
     if (isNaN(memberId)) {
       return res.status(400).json({
@@ -158,7 +159,8 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
       business_number, // 단체: 사업자번호
       inyear = '1', 
       block_type = 'C', 
-      str_cur_page = '1' 
+      str_cur_page = '1',
+      str_page_size = '10'
     } = req.query;
 
     // 개인 또는 단체 구분
@@ -174,7 +176,8 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
 
     const inYear = parseInt(inyear as string, 10);
     const currentPage = parseInt(str_cur_page as string, 10);
-    const pageSize = 10;
+    const pageSizeRaw = parseInt(str_page_size as string, 10);
+    const pageSize = Number.isFinite(pageSizeRaw) && pageSizeRaw > 0 ? pageSizeRaw : 10;
 
     // 날짜 범위 계산
     const endDate = new Date();
@@ -402,10 +405,12 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
         m.birth_date as member_birth_date,
         m.mobile_phone as member_phone,
         m.email as member_email,
+        m.email_domain as member_email_domain,
         (SELECT COUNT(*) FROM insured_persons ip WHERE ip.contract_id = tc.id) as insured_persons_count,
         ctr.contractor_type,
         ctr.company_name,
-        ctr.name as contractor_name
+        ctr.name as contractor_name,
+        ctr.business_number as contractor_business_number
       FROM travel_contracts tc
       LEFT JOIN members m ON tc.member_id = m.id
       LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
@@ -486,7 +491,13 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       memberName: contract.member_name || '-',
       memberBirthDate: contract.member_birth_date || '',
       memberPhone: contract.member_phone || '-',
-      memberEmail: contract.member_email || '-',
+      memberEmail: (() => {
+        const email = contract.member_email || '';
+        const domain = contract.member_email_domain || '';
+        if (email && domain) return `${email}@${domain}`;
+        if (email && email.includes('@')) return email;
+        return email || '-';
+      })(),
       travelRegion: contract.travel_region || null,
       travelCountry: contract.travel_country || null,
       travelPurpose: contract.travel_purpose || null,
@@ -504,6 +515,7 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       subscriptionCertificateUrl: contract.subscription_certificate_url || null, // 증권 파일 경로
       contractorType: contract.contractor_type || '개인', // 계약자 유형
       contractorCompanyName: contract.company_name || null, // 법인명 (법인인 경우)
+      businessNumber: contract.contractor_business_number || null, // 사업자번호 (법인인 경우)
     };
 
     res.json({
@@ -595,19 +607,11 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
 
     const contract = contracts[0];
 
-    // 생년월일 포맷팅 함수
+    // resident_number: "19670323-1******" → 하이픈 앞 8자리(YYYYMMDD) 그대로 반환
     const formatBirthDate = (residentNumber: string | null) => {
       if (!residentNumber) return '';
-      const cleaned = residentNumber.replace(/-/g, '');
-      if (cleaned.length >= 6) {
-        const year = cleaned.substring(0, 2);
-        const month = cleaned.substring(2, 4);
-        const day = cleaned.substring(4, 6);
-        // 1900년대 또는 2000년대 판단 (간단히 앞자리로 판단)
-        const fullYear = parseInt(year) < 50 ? `20${year}` : `19${year}`;
-        return `${fullYear}.${month}.${day}`;
-      }
-      return '';
+      const part = residentNumber.split('-')[0]?.replace(/\D/g, '') ?? '';
+      return part.length >= 8 ? part.slice(0, 8) : part.length >= 6 ? part.slice(0, 6) : '';
     };
 
     // 총 보험료를 Number로 변환
