@@ -923,17 +923,18 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         const bankName = payment.bank_name || '';
         const accountNumber = payment.account_number || '';
         const accountHolderName = '빨주노초파남보';
-        const message = `[투어밸리] 무통장입금 안내
+        const message = `[투어밸리] 여행자보험료 입금안내
 
-보험료가 정상적으로 접수되었습니다.
-아래 계좌로 ${expectedDateText}까지 보험료를 입금해 주세요.
+보험료 무통장입금 안내입니다.
+아래의 보험료 입금 전용계좌로 ${expectedDateText}까지
+보험료를 입금해 주세요
 
-은행: ${bankName}
-계좌번호: ${accountNumber}
-예금주: ${accountHolderName}
-입금금액: ${Number(amountToPay).toLocaleString()}원
+은행 : ${bankName}
+계좌번호 : ${accountNumber}
+예금주 : ${accountHolderName}
+보험료 : ${Number(amountToPay).toLocaleString()}원
 
-입금 확인 후 보험 가입이 완료됩니다.`;
+보험료 입금확인 후 보험가입이 완료됩니다.`;
 
         try {
           await sendSms({
