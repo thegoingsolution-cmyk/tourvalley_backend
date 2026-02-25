@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 import { sendSms } from '../services/aligoService';
@@ -123,6 +124,143 @@ const getFrontendUrl = (): string => {
   return process.env.NODE_ENV === 'production' 
     ? 'https://www.bzvalley.net'
     : 'http://localhost:3000';
+};
+
+const COUNTRY_NAME_ALIASES: Record<string, string> = {
+  포르투갈: '포르투칼',
+  남아프리카공화국: '남아공화국',
+  파푸아뉴기니: '파푸아뉴기니아',
+  터키: '터어키',
+  코트디부아르: '코트디브와르',
+};
+
+const normalizeCountryName = (value?: string | null) => {
+  if (!value) return '';
+  const stripped = value.replace('(가입불가)', '').trim();
+  return COUNTRY_NAME_ALIASES[stripped] || stripped;
+};
+
+const getBizplayAesKey = (): Buffer | null => {
+  const rawKey = process.env.BIZPLAY_AES_KEY;
+  if (!rawKey) return null;
+
+  if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
+    return Buffer.from(rawKey, 'hex');
+  }
+
+  if (/^[A-Za-z0-9+/=]+$/.test(rawKey)) {
+    const base64Buf = Buffer.from(rawKey, 'base64');
+    if (base64Buf.length === 32) {
+      return base64Buf;
+    }
+  }
+
+  const utf8Buf = Buffer.from(rawKey, 'utf8');
+  if (utf8Buf.length === 32) {
+    return utf8Buf;
+  }
+
+  return null;
+};
+
+const decryptBizplayField = (value: string, aesKey: Buffer): string => {
+  const decipher = crypto.createDecipheriv('aes-256-ecb', aesKey, null);
+  decipher.setAutoPadding(true);
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(value, 'base64')),
+    decipher.final(),
+  ]);
+  return decrypted.toString('utf8').trim();
+};
+
+const parseBizplayDateTime = (value: string): Date | null => {
+  if (!value) return null;
+  const compact = value.replace(/[^0-9]/g, '');
+  if (![8, 10, 12].includes(compact.length)) return null;
+  const year = parseInt(compact.substring(0, 4), 10);
+  const month = parseInt(compact.substring(4, 6), 10);
+  const day = parseInt(compact.substring(6, 8), 10);
+  const hour = compact.length >= 10 ? parseInt(compact.substring(8, 10), 10) : 0;
+  const minute = compact.length === 12 ? parseInt(compact.substring(10, 12), 10) : 0;
+  if ([year, month, day, hour, minute].some((num) => Number.isNaN(num))) return null;
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  if (hour < 0 || hour > 23) return null;
+  if (minute < 0 || minute > 59) return null;
+  const parsed = new Date(year, month - 1, day, hour, minute);
+  if (parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
+  return parsed;
+};
+
+const resolveBizplayInsuranceType = (tourPlace: string): string => {
+  return tourPlace === 'KR' ? '국내여행보험' : '해외여행보험';
+};
+
+const resolveCountryNameFromCode = (code: string): string | null => {
+  if (!code) return null;
+  const normalized = code.trim().toUpperCase();
+  if (!normalized) return null;
+  if (normalized === 'KR') return '국내';
+  try {
+    const displayNames = new Intl.DisplayNames(['ko'], { type: 'region' });
+    const label = displayNames.of(normalized);
+    if (!label || label === normalized) return null;
+    return label;
+  } catch (error) {
+    return null;
+  }
+};
+
+const BIZPLAY_PLAN_MAP: Record<string, Record<string, string>> = {
+  N521029: {
+    BAS: '실속플랜',
+    STD: '표준플랜',
+    CHV: '어린이플랜',
+    OLD: '어르신플랜',
+    DSM: '표준플랜',
+    CHM: '어린이플랜',
+    OLM: '어르신플랜',
+    SP1: '실속플랜',
+  },
+  N520046: {
+    BAS: '실속플랜',
+    STD: '표준플랜',
+    HCV: '고급플랜',
+    CHV: '어린이플랜',
+    OLD: '어르신플랜1',
+    OL2: '어르신플랜2',
+    BAM: '실속플랜',
+    STM: '표준플랜',
+    HCM: '고급플랜',
+    CHM: '어린이플랜',
+    OLM: '어르신플랜1',
+    O2M: '어르신플랜2',
+  },
+  N010001: {
+    BAS: '실속플랜',
+    STD: '표준플랜',
+    HCV: '고급플랜',
+    CHV: '어린이플랜',
+    CH2: '어린이플랜',
+  },
+};
+
+const resolveBizplayPlanType = (productCode: string, planCode: string): string | null => {
+  const product = (productCode || '').trim().toUpperCase();
+  const plan = (planCode || '').trim().toUpperCase();
+  if (!product || !plan) return null;
+  return BIZPLAY_PLAN_MAP[product]?.[plan] ?? null;
+};
+
+const formatBizplayResidentNumber = (value: string): string => {
+  const digits = String(value || '').replace(/[^0-9]/g, '');
+  if (digits.length >= 9) {
+    return `${digits.slice(0, 7)}-${digits.slice(8, 9)}******`;
+  }
+  if (digits.length >= 8) {
+    return `${digits.slice(0, 7)}-******`;
+  }
+  return value;
 };
 
 const isReceiptUrl = (value: string) => {
@@ -607,27 +745,18 @@ function generateContractNumber(): string {
   return `TC${year}${month}${day}${random}`;
 }
 
-// 계약 등록 (B2C 프론트엔드용)
+// 계약 등록 (B2C/제휴사 공용)
 router.post('/api/travel/register-contract', async (req: Request, res: Response) => {
+  if (req.body?.join_contract_id) {
+    return handleBizplayRegisterContract(req, res);
+  }
+
   const connection = await pool.getConnection();
   
   try {
     await connection.beginTransaction();
 
     const { contract, contractor, insured_persons, companions, payment } = req.body;
-    const COUNTRY_NAME_ALIASES: Record<string, string> = {
-      포르투갈: '포르투칼',
-      남아프리카공화국: '남아공화국',
-      파푸아뉴기니: '파푸아뉴기니아',
-      터키: '터어키',
-      코트디부아르: '코트디브와르',
-    };
-
-    const normalizeCountryName = (value?: string | null) => {
-      if (!value) return '';
-      const stripped = value.replace('(가입불가)', '').trim();
-      return COUNTRY_NAME_ALIASES[stripped] || stripped;
-    };
 
     let resolvedTravelRegion: string | null = contract?.travel_region || null;
     if (resolvedTravelRegion === '해외') {
@@ -965,6 +1094,388 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     connection.release();
   }
 });
+
+// 계약 등록 (비즈플레이 연동용)
+const handleBizplayRegisterContract = async (req: Request, res: Response) => {
+  const connection = await pool.getConnection();
+
+  try {
+    const {
+      join_contract_id,
+      product_cd,
+      insuperiod_from,
+      insuperiod_to,
+      tour_place,
+      insured_cnt,
+      tot_premium,
+      join_access_point,
+      affiliate_name,
+      email,
+      ctel_no,
+      insured,
+    } = req.body || {};
+
+    if (
+      !join_contract_id ||
+      !product_cd ||
+      !insuperiod_from ||
+      !insuperiod_to ||
+      !tour_place ||
+      !insured_cnt ||
+      !tot_premium ||
+      !join_access_point ||
+      !email ||
+      !ctel_no ||
+      !Array.isArray(insured) ||
+      insured.length === 0
+    ) {
+      return res.json({
+        result_cd: '201',
+        message: '필수 데이터가 누락되었거나 형식이 올바르지 않습니다.',
+      });
+    }
+
+    const insuredCountValue = Number(insured_cnt);
+    const totalPremiumValue = Number(tot_premium);
+    if (!Number.isFinite(insuredCountValue) || insuredCountValue <= 0 || !Number.isFinite(totalPremiumValue)) {
+      return res.json({
+        result_cd: '201',
+        message: '인원수 또는 보험료 값이 올바르지 않습니다.',
+      });
+    }
+
+    const departureDate = parseBizplayDateTime(insuperiod_from);
+    const arrivalDate = parseBizplayDateTime(insuperiod_to);
+    if (!departureDate || !arrivalDate || arrivalDate.getTime() <= departureDate.getTime()) {
+      return res.json({
+        result_cd: '201',
+        message: '여행기간 형식이 올바르지 않습니다.',
+      });
+    }
+
+    const aesKey = getBizplayAesKey();
+    if (!aesKey) {
+      return res.json({
+        result_cd: '200',
+        message: 'BIZPLAY_AES_KEY가 설정되어 있지 않습니다.',
+      });
+    }
+
+    let decryptedEmail = '';
+    let decryptedPhone = '';
+    try {
+      decryptedEmail = decryptBizplayField(email, aesKey);
+      decryptedPhone = decryptBizplayField(ctel_no, aesKey);
+    } catch (error) {
+      return res.json({
+        result_cd: '201',
+        message: '암호화 데이터 형식이 올바르지 않습니다.',
+      });
+    }
+
+    const insuredRecords: Array<{
+      sequence: number;
+      name: string;
+      ssn: string;
+      masked_ssn: string;
+      plan_cd: string;
+      plan_type: string;
+      premium: number;
+    }> = [];
+
+    for (let i = 0; i < insured.length; i++) {
+      const item = insured[i] || {};
+      const sequence = Number(item.insured_seq);
+      const premiumValue = Number(item.premium);
+      if (!item.insured_seq || !item.plan_cd || !item.insured_ssn || !item.insured_name) {
+        return res.json({
+          result_cd: '201',
+          message: '피보험자 정보가 누락되었습니다.',
+        });
+      }
+      if (!Number.isFinite(sequence) || sequence <= 0 || !Number.isFinite(premiumValue)) {
+        return res.json({
+          result_cd: '201',
+          message: '피보험자 정보 형식이 올바르지 않습니다.',
+        });
+      }
+
+      const planType = resolveBizplayPlanType(product_cd, item.plan_cd);
+      if (!planType) {
+        return res.json({
+          result_cd: '201',
+          message: '플랜 코드가 올바르지 않습니다.',
+        });
+      }
+
+      try {
+        const decryptedSsn = decryptBizplayField(item.insured_ssn, aesKey);
+        insuredRecords.push({
+          sequence,
+          name: decryptBizplayField(item.insured_name, aesKey),
+          ssn: decryptedSsn,
+          masked_ssn: formatBizplayResidentNumber(decryptedSsn),
+          plan_cd: item.plan_cd,
+          plan_type: planType,
+          premium: premiumValue,
+        });
+      } catch (error) {
+        return res.json({
+          result_cd: '201',
+          message: '피보험자 암호화 데이터 형식이 올바르지 않습니다.',
+        });
+      }
+    }
+
+    const [existingRows] = await connection.execute<any[]>(
+      'SELECT id FROM travel_contracts WHERE contract_number = ? LIMIT 1',
+      [join_contract_id]
+    );
+    if (existingRows.length > 0) {
+      return res.json({
+        result_cd: '202',
+        contract_id: existingRows[0].id,
+        message: '이미 등록된 계약입니다.',
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const tourPlaceCode = String(tour_place).trim().toUpperCase();
+    const insuranceType = resolveBizplayInsuranceType(tourPlaceCode);
+    const countryLabel = resolveCountryNameFromCode(tourPlaceCode);
+    if (!countryLabel) {
+      return res.json({
+        result_cd: '201',
+        message: '국가 코드가 올바르지 않습니다.',
+      });
+    }
+    const normalizedCountry = normalizeCountryName(countryLabel);
+    let resolvedTravelRegion: string | null = null;
+
+    if (tourPlaceCode === 'KR') {
+      resolvedTravelRegion = '전국일원';
+    } else {
+      try {
+        const [filteredRows] = await connection.execute<any[]>(
+          `SELECT region_name
+             FROM travel_regions
+            WHERE is_active = 1
+              AND country_name = ?
+              AND JSON_CONTAINS(insurance_types, ?)
+            ORDER BY display_order, id
+            LIMIT 1`,
+          [normalizedCountry, JSON.stringify(insuranceType)]
+        );
+        if (filteredRows.length > 0 && filteredRows[0]?.region_name) {
+          resolvedTravelRegion = filteredRows[0].region_name;
+        } else {
+          const [fallbackRows] = await connection.execute<any[]>(
+            `SELECT region_name
+               FROM travel_regions
+              WHERE is_active = 1
+                AND country_name = ?
+              ORDER BY display_order, id
+              LIMIT 1`,
+            [normalizedCountry]
+          );
+          if (fallbackRows.length > 0 && fallbackRows[0]?.region_name) {
+            resolvedTravelRegion = fallbackRows[0].region_name;
+          }
+        }
+      } catch (error) {
+        console.error('Failed to resolve travel region for Bizplay:', error);
+      }
+    }
+
+    if (!resolvedTravelRegion) {
+      return res.json({
+        result_cd: '201',
+        message: '여행지 정보를 확인할 수 없습니다.',
+      });
+    }
+    const durationDays = Math.max(
+      1,
+      Math.round((arrivalDate.getTime() - departureDate.getTime()) / (1000 * 60 * 60 * 24))
+    );
+    const travelParticipants = Math.max(insuredCountValue, insuredRecords.length);
+    const resolvedAffiliate = String(affiliate_name || '').trim() || '비즈플레이';
+    const memo = `Bizplay join_contract_id: ${join_contract_id}, product_cd: ${product_cd}`;
+
+    const [contractResult] = await connection.execute<any>(
+      `INSERT INTO travel_contracts (
+        member_id, contract_number, insurance_type, departure_date, duration_months, duration_days,
+        arrival_date, travel_region, travel_country, travel_purpose, travel_participants,
+        payment_method, payment_status, total_premium, affiliate, device, access_path,
+        system_input_status, memo
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        null,
+        join_contract_id,
+        insuranceType,
+        departureDate,
+        0,
+        durationDays,
+        arrivalDate,
+        resolvedTravelRegion,
+        normalizedCountry,
+        '여행',
+        travelParticipants,
+        null,
+        '결제완료',
+        totalPremiumValue,
+        resolvedAffiliate,
+        'PC',
+        join_access_point,
+        '자동입력',
+        memo,
+      ]
+    );
+
+    const contract_id = contractResult.insertId;
+    const primaryInsured = insuredRecords[0];
+
+    const [contractorResult] = await connection.execute<any>(
+      `INSERT INTO contractors (
+        contract_id, contractor_type, name, resident_number, mobile_phone, email,
+        company_name, business_number, contact_person, phone
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        contract_id,
+        '개인',
+        primaryInsured.name,
+        primaryInsured.masked_ssn,
+        decryptedPhone,
+        decryptedEmail,
+        null,
+        null,
+        null,
+        decryptedPhone,
+      ]
+    );
+
+    const contractor_id = contractorResult.insertId;
+
+    for (let i = 0; i < insuredRecords.length; i++) {
+      const record = insuredRecords[i];
+      const [insuredResult] = await connection.execute<any>(
+        `INSERT INTO insured_persons (
+          contract_id, contractor_id, is_same_as_contractor, name, english_name, resident_number, gender,
+          health_status, has_illness_history, occupation, departure_status, sequence_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          contract_id,
+          contractor_id,
+          i === 0 ? 1 : 0,
+          record.name,
+          null,
+          record.masked_ssn,
+          null,
+          '좋다',
+          0,
+          null,
+          null,
+          record.sequence,
+        ]
+      );
+
+      const insured_person_id = insuredResult.insertId;
+
+      await connection.execute<any>(
+        `INSERT INTO companions (
+          contract_id, insured_person_id, name, english_name, nationality_type, 
+          nationality_continent, nationality_country, resident_number, gender,
+          has_illness_history, has_medical_expense, plan_type, premium, sequence_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          contract_id,
+          insured_person_id,
+          record.name,
+          null,
+          null,
+          null,
+          null,
+          record.masked_ssn,
+          null,
+          0,
+          0,
+          record.plan_type,
+          record.premium,
+          record.sequence,
+        ]
+      );
+    }
+
+    await connection.commit();
+
+    res.json({
+      result_cd: '100',
+      contract_id,
+      message: '계약이 성공적으로 등록되었습니다.',
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Bizplay contract registration error:', error);
+    res.json({
+      result_cd: '200',
+      message: '계약 등록 중 오류가 발생했습니다.',
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// 계약 취소 (비즈플레이 연동용)
+const handleBizplayCancelContract = async (req: Request, res: Response) => {
+  try {
+    const { join_contract_id } = req.body || {};
+    if (!join_contract_id) {
+      return res.json({
+        result_cd: '201',
+        contract_id: -1,
+        message: 'join_contract_id가 필요합니다.',
+      });
+    }
+
+    const [rows] = await pool.execute<any[]>(
+      'SELECT id FROM travel_contracts WHERE contract_number = ? LIMIT 1',
+      [join_contract_id]
+    );
+
+    if (!rows.length) {
+      return res.json({
+        result_cd: '201',
+        contract_id: -1,
+        message: '해당 비즈플레이 예약번호로 등록된 계약이 없습니다.',
+      });
+    }
+
+    const contractId = rows[0].id;
+    await pool.execute(
+      `UPDATE travel_contracts
+         SET status = '취소신청',
+             updated_at = NOW()
+       WHERE id = ?`,
+      [contractId]
+    );
+
+    res.json({
+      result_cd: '100',
+      contract_id: contractId,
+      message: '계약 취소가 완료되었습니다.',
+    });
+  } catch (error) {
+    console.error('Bizplay contract cancel error:', error);
+    res.json({
+      result_cd: '200',
+      contract_id: -1,
+      message: '계약 취소 중 오류가 발생했습니다.',
+    });
+  }
+};
+
+router.post('/api/travel/bizplay/cancel-contract', handleBizplayCancelContract);
+router.post('/api/travel/cancel-contract', handleBizplayCancelContract);
 
 // 환율 정보 조회 (하루 전날 환율)
 router.get('/api/travel/exchange-rate', async (req: Request, res: Response) => {
