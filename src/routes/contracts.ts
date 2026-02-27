@@ -406,7 +406,7 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
         m.mobile_phone as member_phone,
         m.email as member_email,
         m.email_domain as member_email_domain,
-        (SELECT COUNT(*) FROM insured_persons ip WHERE ip.contract_id = tc.id) as insured_persons_count,
+        (SELECT COUNT(*) FROM companions c WHERE c.contract_id = tc.id) as participants_count,
         ctr.contractor_type,
         ctr.company_name,
         ctr.name as contractor_name,
@@ -475,8 +475,8 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       // payments 테이블이 없거나 오류가 발생해도 계속 진행
     }
 
-    // 실제 피보험자 수 계산 (insured_persons 테이블에서)
-    const actualInsuredCount = contract.insured_persons_count || contract.travel_participants || 1;
+    // 실제 피보험자 수 계산 (companions 테이블에서)
+    const actualInsuredCount = contract.participants_count || contract.travel_participants || 1;
 
     // 데이터 포맷팅
     const formattedContract = {
@@ -552,7 +552,7 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
       });
     }
 
-    // 피보험자 정보 조회 (companions 테이블에서 직접 조회 - 모든 피보험자 정보가 여기에 있음)
+    // 피보험자 정보 조회 (companions 테이블에서 직접 조회)
     const [companionsData] = await pool.execute<any[]>(
       `SELECT 
         c.id,
@@ -569,26 +569,7 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
       [contractId]
     );
 
-    // companions가 없으면 insured_persons에서 조회 (fallback)
-    let insuredPersons = companionsData;
-    if (companionsData.length === 0) {
-      const [insured] = await pool.execute<any[]>(
-        `SELECT 
-          ip.id,
-          ip.name,
-          ip.gender,
-          ip.resident_number,
-          ip.sequence_number,
-          NULL as plan_type,
-          0 as premium,
-          0 as has_medical_expense
-        FROM insured_persons ip
-        WHERE ip.contract_id = ?
-        ORDER BY ip.sequence_number ASC`,
-        [contractId]
-      );
-      insuredPersons = insured;
-    }
+    const insuredPersons = companionsData;
 
     // 계약 정보 조회 (총 보험료 등)
     const [contracts] = await pool.execute<any[]>(

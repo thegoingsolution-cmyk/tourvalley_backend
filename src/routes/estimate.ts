@@ -191,35 +191,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       const age = calculateAgeFromBirthDate(birthDate);
       const residentNumber = generateResidentNumber(birthDate, gender);
 
-      // 3-1. estimate_insured_persons에 저장 (첫 번째만, 나머지는 companions로)
-      if (i === 0) {
-        await connection.execute(
-          `INSERT INTO estimate_insured_persons (
-            estimate_request_id,
-            contractor_id,
-            is_same_as_contractor,
-            name,
-            resident_number,
-            gender,
-            health_status,
-            has_illness_history,
-            sequence_number
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            estimateId,
-            contractorId,
-            0,
-            '보험대상자1',
-            residentNumber,
-            gender,
-            '좋다',
-            0,
-            sequence,
-          ]
-        );
-      }
-
-      // 3-2. estimate_companions에 저장 (모든 피보험자)
+      // 3. estimate_companions에 저장 (모든 피보험자)
       // 보험료는 나중에 계산하거나 0으로 설정
       await connection.execute(
         `INSERT INTO estimate_companions (

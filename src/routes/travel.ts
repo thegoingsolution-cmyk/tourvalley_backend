@@ -833,7 +833,7 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         payment?.payment_method || null,
         payment?.status === '완료' ? '결제완료' : '미결제',
         contract.total_premium || 0,
-        '투어밸리',
+        contract.affiliate || '투어밸리', // 프론트에서 전달받은 affiliate (네이버검색광고 등)
         contract.device || 'PC', // 프론트에서 전달받은 device
         contract.access_path || '투어밸리 사이트', // 프론트에서 전달받은 access_path
         '자동입력',
@@ -864,43 +864,19 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
 
     const contractor_id = contractorResult.insertId;
 
-    // 3. 피보험자 정보 저장
+    // 3. 피보험자 정보 저장 (companions 테이블에만 저장)
     for (let i = 0; i < insured_persons.length; i++) {
       const insured = insured_persons[i];
       
-      const [insuredResult] = await connection.execute<any>(
-        `INSERT INTO insured_persons (
-          contract_id, contractor_id, is_same_as_contractor, name, english_name, resident_number, gender,
-          health_status, has_illness_history, occupation, departure_status, sequence_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          contract_id,
-          contractor_id,
-          1, // B2C는 계약자와 동일인으로 가정
-          insured.name,
-          insured.english_name || null,
-          insured.resident_number || null,
-          insured.gender || null,
-          '좋다', // 기본값
-          0, // 과거상병 없음
-          null, // 직업 정보 없음
-          null, // 출국여부 정보 없음
-          insured.sequence_number || (i + 1),
-        ]
-      );
-
-      const insured_person_id = insuredResult.insertId;
-
-      // 피보험자를 companions 테이블에도 저장 (플랜, 보험료 정보 포함)
+      // 피보험자를 companions 테이블에 저장 (플랜, 보험료 정보 포함)
       await connection.execute<any>(
         `INSERT INTO companions (
-          contract_id, insured_person_id, name, english_name, nationality_type, 
+          contract_id, name, english_name, nationality_type, 
           nationality_continent, nationality_country, resident_number, gender,
           has_illness_history, has_medical_expense, plan_type, premium, sequence_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
-          insured_person_id,
           insured.name,
           insured.english_name || null,
           insured.nationality_type || null,
@@ -1358,38 +1334,16 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
 
     for (let i = 0; i < insuredRecords.length; i++) {
       const record = insuredRecords[i];
-      const [insuredResult] = await connection.execute<any>(
-        `INSERT INTO insured_persons (
-          contract_id, contractor_id, is_same_as_contractor, name, english_name, resident_number, gender,
-          health_status, has_illness_history, occupation, departure_status, sequence_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          contract_id,
-          contractor_id,
-          i === 0 ? 1 : 0,
-          record.name,
-          null,
-          record.masked_ssn,
-          null,
-          '좋다',
-          0,
-          null,
-          null,
-          record.sequence,
-        ]
-      );
-
-      const insured_person_id = insuredResult.insertId;
-
+      
+      // 피보험자를 companions 테이블에만 저장
       await connection.execute<any>(
         `INSERT INTO companions (
-          contract_id, insured_person_id, name, english_name, nationality_type, 
+          contract_id, name, english_name, nationality_type, 
           nationality_continent, nationality_country, resident_number, gender,
           has_illness_history, has_medical_expense, plan_type, premium, sequence_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
-          insured_person_id,
           record.name,
           null,
           null,

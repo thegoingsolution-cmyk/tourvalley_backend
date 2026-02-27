@@ -52,25 +52,26 @@ export const loginMember = async (username: string, password: string): Promise<{
   member?: MemberInfo;
 }> => {
   try {
-    const hashedPassword = hashPassword(password);
-
-    const [rows] = await pool.execute<RowDataPacket[]>(
+    // 먼저 username으로 회원 정보 조회 (password와 last_login_at 포함)
+    const [memberRows] = await pool.execute<RowDataPacket[]>(
       `SELECT id, member_type, username, name, birth_date, gender, 
               email, email_domain, mobile_phone, mileage, accident_free_cash, 
-              marketing_agreed, email_receive, sms_receive, status 
+              marketing_agreed, email_receive, sms_receive, status,
+              password, last_login_at
        FROM members 
-       WHERE username = ? AND password = ?`,
-      [username, hashedPassword]
+       WHERE username = ?`,
+      [username]
     );
 
-    if (rows.length === 0) {
+    if (memberRows.length === 0) {
       return { 
         success: false, 
         message: '아이디 또는 비밀번호가 일치하지 않습니다.' 
       };
     }
 
-    const member = rows[0] as MemberInfo;
+    const memberData = memberRows[0];
+    const member = memberData as MemberInfo & { password: string | null; last_login_at: string | null };
 
     // 회원 상태 확인
     if (member.status === '휴면') {
@@ -84,6 +85,52 @@ export const loginMember = async (username: string, password: string): Promise<{
       return { 
         success: false, 
         message: '탈퇴한 계정입니다.' 
+      };
+    }
+
+    // 마이그레이션된 사용자 최초 로그인 처리
+    // password가 NULL이거나 빈 문자열이고, last_login_at이 NULL인 경우
+    const isFirstLogin = (!member.password || member.password.trim() === '') && !member.last_login_at;
+
+    if (isFirstLogin) {
+      // 사용자가 입력한 비밀번호를 해시화해서 저장
+      const hashedPassword = hashPassword(password);
+      await pool.execute(
+        'UPDATE members SET password = ?, last_login_at = NOW() WHERE id = ?',
+        [hashedPassword, member.id]
+      );
+
+      console.log(`✅ 최초 로그인 및 비밀번호 설정 완료: ${username} (ID: ${member.id})`);
+
+      return {
+        success: true,
+        message: '로그인 성공',
+        member: {
+          id: member.id,
+          member_type: member.member_type,
+          username: member.username,
+          name: member.name,
+          birth_date: member.birth_date,
+          gender: member.gender,
+          email: member.email,
+          email_domain: member.email_domain,
+          mobile_phone: member.mobile_phone,
+          mileage: member.mileage,
+          accident_free_cash: member.accident_free_cash,
+          marketing_agreed: !!member.marketing_agreed,
+          email_receive: !!member.email_receive,
+          sms_receive: !!member.sms_receive,
+          status: member.status,
+        },
+      };
+    }
+
+    // 기존 로그인 로직: 비밀번호 검증
+    const hashedPassword = hashPassword(password);
+    if (member.password !== hashedPassword) {
+      return { 
+        success: false, 
+        message: '아이디 또는 비밀번호가 일치하지 않습니다.' 
       };
     }
 
