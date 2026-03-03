@@ -1511,9 +1511,15 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
       customerEmail,
       customerPhone,
       checkOutDate, // 보험 종료일 (YYYY-MM-DD)
+      purchaserName,   // 보험사 가맹점: 구매자 성명 (customerName과 동일 또는 별도)
+      purchaserBirthday, // 보험사 가맹점: 구매자 생년월일 (YYYYMMDD)
     } = req.body;
 
-    console.log('네이버페이 결제 준비:', { contractId, amount, productName, checkOutDate });
+    // 보험사 가맹점: purchaserName 또는 purchaserBirthday 필요 시 프론트에서 전달
+    const resolvedPurchaserName = (purchaserName && String(purchaserName).trim()) || (customerName && String(customerName).trim()) || undefined;
+    const resolvedPurchaserBirthday = purchaserBirthday ? String(purchaserBirthday).replace(/[^0-9]/g, '').slice(0, 8) : undefined;
+
+    console.log('네이버페이 결제 준비:', { contractId, amount, productName, checkOutDate, purchaserName: resolvedPurchaserName, purchaserBirthday: resolvedPurchaserBirthday ? '***' : undefined });
 
     // 필수 필드 검증
     if (!amount || !productName || !checkOutDate) {
@@ -1578,6 +1584,9 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
         productName,
         productCount: productCount || 1,
         useCfmYmdt,
+        // 보험사 가맹점: 클라이언트 oPay.open() 시 purchaserName / purchaserBirthday 로 전달 권장
+        purchaserName: resolvedPurchaserName,
+        purchaserBirthday: resolvedPurchaserBirthday,
       },
     });
   } catch (error) {
