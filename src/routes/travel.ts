@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 import { sendSms } from '../services/aligoService';
+import { parseDateTimeAsKst } from '../utils/dateTime';
 
 const router = Router();
 
@@ -31,6 +32,20 @@ const addMonthsPreserveDate = (date: Date, months: number): Date => {
     date.getSeconds(),
     date.getMilliseconds()
   );
+};
+
+/** MySQL은 24:00:00 미지원. "YYYY-MM-DD 24:00:00" → 다음날 00:00:00으로 변환 */
+const normalizeDatetimeForDb = (datetime: string | null | undefined): string => {
+  if (datetime == null || typeof datetime !== 'string') return datetime ?? '';
+  const trimmed = datetime.trim();
+  const m = trimmed.match(/^(\d{4}-\d{2}-\d{2}) 24:00:00$/);
+  if (!m) return trimmed;
+  const d = new Date(m[1] + 'T00:00:00');
+  d.setDate(d.getDate() + 1);
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${day} 00:00:00`;
 };
 
 const getRateLookupCriteria = (
@@ -103,6 +118,20 @@ const calculateAgeDetail = (birthDate: Date, referenceDate: Date) => {
   };
 };
 
+/** 만 나이(전 나이): 기준일 기준 생일 경과 여부로 계산한 완전한 연수 */
+const getFullYearsAge = (birthDate: Date, referenceDate: Date): number => {
+  if (referenceDate.getTime() < birthDate.getTime()) return 0;
+  let y = referenceDate.getFullYear() - birthDate.getFullYear();
+  const refM = referenceDate.getMonth();
+  const refD = referenceDate.getDate();
+  const birthM = birthDate.getMonth();
+  const birthD = birthDate.getDate();
+  if (refM < birthM || (refM === birthM && refD < birthD)) y -= 1;
+  return y;
+};
+
+const ADULT_PLAN_TYPES = ['실속플랜', '표준플랜', '고보장플랜', '고급플랜'];
+
 // 프론트엔드 URL 추론 헬퍼 함수
 const getFrontendUrl = (): string => {
   // 1. FRONTEND_URL 환경 변수가 있으면 사용
@@ -173,6 +202,7 @@ const decryptBizplayField = (value: string, aesKey: Buffer): string => {
   return decrypted.toString('utf8').trim();
 };
 
+/** 비즈플레이 일시 파싱. 24시 허용 (JS Date가 자동으로 다음날 00:00으로 처리, MySQL 24:00 규칙과 동일) */
 const parseBizplayDateTime = (value: string): Date | null => {
   if (!value) return null;
   const compact = value.replace(/[^0-9]/g, '');
@@ -185,10 +215,10 @@ const parseBizplayDateTime = (value: string): Date | null => {
   if ([year, month, day, hour, minute].some((num) => Number.isNaN(num))) return null;
   if (month < 1 || month > 12) return null;
   if (day < 1 || day > 31) return null;
-  if (hour < 0 || hour > 23) return null;
+  if (hour < 0 || hour > 24) return null;
   if (minute < 0 || minute > 59) return null;
   const parsed = new Date(year, month - 1, day, hour, minute);
-  if (parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
+  if (parsed.getTime() !== parsed.getTime()) return null;
   return parsed;
 };
 
@@ -412,11 +442,11 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       });
     }
 
-    // 보험기간 계산 (일수)
-    const departure = new Date(departure_date);
-    const arrival = new Date(arrival_date);
+    // 보험기간 계산 (일수): 입력값을 KST로 해석, 부분일은 1일로 올림
+    const departure = parseDateTimeAsKst(departure_date) ?? new Date(departure_date);
+    const arrival = parseDateTimeAsKst(arrival_date) ?? new Date(arrival_date);
     const diffTime = arrival.getTime() - departure.getTime();
-    const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
     const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
 
     console.log('기간 계산:', {
@@ -433,8 +463,20 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       });
     }
 
-    // 요청된 플랜 타입 그대로 사용 (어린이플랜2 등 유지)
-    const finalPlanType = plan_type;
+    // 보험나이 15세일 때만 만 나이로 성인/어린이 구분
+    let finalPlanType = plan_type;
+    if (age === 15 && parsedBirthDate) {
+      const refForManNai = departure;
+      const manNai = getFullYearsAge(parsedBirthDate, refForManNai);
+      if (manNai >= 15) {
+        // 만 15세 이상 → 성인 플랜(실속/표준/고보장). 다른 성인 플랜 없으면 디폴트 실속플랜
+        finalPlanType = ADULT_PLAN_TYPES.includes(plan_type) ? plan_type : '실속플랜';
+      } else {
+        // 만 15세 미만 → 어린이 플랜
+        finalPlanType = '어린이플랜';
+      }
+      console.log('보험나이 15세 만나이 보정:', { manNai, original: plan_type, final: finalPlanType });
+    }
     console.log('플랜 타입:', { original: plan_type, final: finalPlanType, age });
 
     let annualPremium: number;
@@ -822,10 +864,10 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         contract.member_id || null, // 회원 ID (비회원은 null)
         contract_number,
         contract.insurance_type,
-        contract.departure_date,
+        normalizeDatetimeForDb(contract.departure_date),
         contract.duration_months,
         contract.duration_days,
-        contract.arrival_date,
+        normalizeDatetimeForDb(contract.arrival_date),
         resolvedTravelRegion,
         contract.travel_country || null,
         contract.travel_purpose,
@@ -1272,7 +1314,7 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
     }
     const durationDays = Math.max(
       1,
-      Math.round((arrivalDate.getTime() - departureDate.getTime()) / (1000 * 60 * 60 * 24))
+      Math.ceil((arrivalDate.getTime() - departureDate.getTime()) / (1000 * 60 * 60 * 24))
     );
     const travelParticipants = Math.max(insuredCountValue, insuredRecords.length);
     const resolvedAffiliate = String(affiliate_name || '').trim() || '비즈플레이';
@@ -1283,8 +1325,8 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
         member_id, contract_number, insurance_type, departure_date, duration_months, duration_days,
         arrival_date, travel_region, travel_country, travel_purpose, travel_participants,
         payment_method, payment_status, total_premium, affiliate, device, access_path,
-        system_input_status, memo
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        system_input_status, memo, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         null,
         join_contract_id,
@@ -1305,6 +1347,7 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
         join_access_point,
         '자동입력',
         memo,
+        '가입완료',
       ]
     );
 
@@ -2268,6 +2311,8 @@ router.post('/api/travel/available-plans', async (req: Request, res: Response) =
       plan_variant = 'B',
       has_medical_expense = 1,
       include_foreign_currency = false,
+      birth_date,
+      departure_date, // 기준일(만 나이 계산용). 없으면 오늘
     } = req.body;
 
     if (!insurance_type || age === undefined || !gender) {
@@ -2276,6 +2321,14 @@ router.post('/api/travel/available-plans', async (req: Request, res: Response) =
         message: '필수 파라미터가 누락되었습니다.',
       });
     }
+
+    console.log('available-plans 요청:', {
+      insurance_type,
+      age,
+      gender,
+      birth_date: birth_date ?? '(없음)',
+      departure_date: departure_date ?? '(없음)',
+    });
 
     const hasMedicalExpenseValue = has_medical_expense ? 1 : 0;
     const params = [insurance_type, age, gender, hasMedicalExpenseValue, plan_variant];
@@ -2310,7 +2363,39 @@ router.post('/api/travel/available-plans', async (req: Request, res: Response) =
       planTypes = planTypes.concat(foreignPlanTypes);
     }
 
-    const uniquePlanTypes = Array.from(new Set(planTypes));
+    let uniquePlanTypes = Array.from(new Set(planTypes));
+
+    console.log('available-plans DB 조회 결과:', { age, plan_types: uniquePlanTypes });
+
+    // 보험나이 15세 + birth_date 있으면 만 나이로 성인/어린이 플랜만 노출
+    if (age === 15 && birth_date) {
+      const refDate = departure_date
+        ? (parseDateTimeAsKst(departure_date) ?? new Date(departure_date))
+        : new Date();
+      const parsedBirth = parseBirthDate(birth_date);
+      if (parsedBirth) {
+        const manNai = getFullYearsAge(parsedBirth, refDate);
+        const beforeFilter = [...uniquePlanTypes];
+        if (manNai >= 15) {
+          uniquePlanTypes = uniquePlanTypes.filter(p => ADULT_PLAN_TYPES.includes(p));
+          if (uniquePlanTypes.length === 0) uniquePlanTypes = ['실속플랜'];
+        } else {
+          uniquePlanTypes = uniquePlanTypes.filter(p => p === '어린이플랜' || p.startsWith('어린이'));
+        }
+        console.log('보험나이 15세 만나이 보정(available-plans):', {
+          birth_date,
+          reference_date: refDate.toISOString(),
+          manNai,
+          구분: manNai >= 15 ? '성인' : '어린이',
+          beforeFilter,
+          afterFilter: uniquePlanTypes,
+        });
+      } else {
+        console.log('보험나이 15세이나 birth_date 파싱 실패 → 만나이 보정 미적용');
+      }
+    } else if (age === 15) {
+      console.log('보험나이 15세이나 birth_date 없음 → 만나이 보정 미적용, DB 결과 그대로 반환');
+    }
 
     return res.json({
       success: true,
@@ -2328,7 +2413,7 @@ router.post('/api/travel/available-plans', async (req: Request, res: Response) =
 // 플랜 보장내용 조회
 router.post('/api/travel/plan-coverages', async (req: Request, res: Response) => {
   try {
-    const { insurance_type, plan_types, currency_plan, has_medical_expense } = req.body;
+    const { insurance_type, plan_types, currency_plan, has_medical_expense, plan_variant } = req.body;
 
     if (!insurance_type || !Array.isArray(plan_types) || plan_types.length === 0) {
       return res.status(400).json({
@@ -2347,6 +2432,10 @@ router.post('/api/travel/plan-coverages', async (req: Request, res: Response) =>
     const medicalExpenseType =
       has_medical_expense === undefined || has_medical_expense ? '실손' : '비실손';
 
+    // 프론트에서 plan_variant를 보내지 않으면 null → DB의 plan_variant IS NULL 행 매칭
+    const planVariant =
+      plan_variant !== undefined && plan_variant !== null ? plan_variant : null;
+
     const resolveCurrencyPlan = (planType: string) => {
       if (planType === '워킹홀리데이(유로화플랜)') {
         return '외화';
@@ -2363,7 +2452,8 @@ router.post('/api/travel/plan-coverages', async (req: Request, res: Response) =>
     const fetchPlanCoveragesFromDb = async (
       insuranceType: string,
       planType: string,
-      planCurrency: string | null
+      planCurrency: string | null,
+      variant: string | null
     ) => {
       const [rows] = await pool.execute<any[]>(
         `SELECT label_text, amount_text
@@ -2372,11 +2462,12 @@ router.post('/api/travel/plan-coverages', async (req: Request, res: Response) =>
             AND plan_type = ?
             AND medical_expense_type = ?
             AND (currency_plan = ? OR (currency_plan IS NULL AND ? IS NULL))
+            AND (plan_variant = ? OR (plan_variant IS NULL AND ? IS NULL))
             AND is_active = 1
             AND (effective_from_date IS NULL OR effective_from_date <= CURRENT_DATE())
             AND (effective_to_date IS NULL OR effective_to_date >= CURRENT_DATE())
           ORDER BY display_order ASC, id ASC`,
-        [insuranceType, planType, medicalExpenseType, planCurrency, planCurrency]
+        [insuranceType, planType, medicalExpenseType, planCurrency, planCurrency, variant, variant]
       );
       return rows.map((row) => ({
         label: row.label_text,
@@ -2388,12 +2479,17 @@ router.post('/api/travel/plan-coverages', async (req: Request, res: Response) =>
     for (const planType of plan_types) {
       const basePlanType = normalizeWorkingHolidayPlan(planType);
       const planCurrency = resolveCurrencyPlan(planType);
-      const dbCoverages = await fetchPlanCoveragesFromDb(insurance_type, basePlanType, planCurrency);
+      const dbCoverages = await fetchPlanCoveragesFromDb(
+        insurance_type,
+        basePlanType,
+        planCurrency,
+        planVariant
+      );
 
       if (dbCoverages.length === 0) {
         return res.status(404).json({
           success: false,
-          message: `보장내용이 DB에 없습니다. (insurance_type=${insurance_type}, plan_type=${basePlanType}, currency_plan=${planCurrency ?? 'NULL'})`,
+          message: `보장내용이 DB에 없습니다. (insurance_type=${insurance_type}, plan_type=${basePlanType}, currency_plan=${planCurrency ?? 'NULL'}, plan_variant=${planVariant ?? 'NULL'})`,
         });
       }
 
@@ -2434,14 +2530,16 @@ router.post('/api/travel/coverage-details', async (req: Request, res: Response) 
       ? (currency_plan || '원화플랜')
       : null;
 
-    const planVariant = plan_variant || 'B';
+    // 프론트에서 plan_variant를 보내지 않으면 null → DB의 plan_variant IS NULL 행 매칭
+    const planVariant =
+      plan_variant !== undefined && plan_variant !== null ? plan_variant : null;
 
     const [sectionRows] = await pool.execute<any[]>(
       `SELECT id, section_title, help_url
          FROM coverage_detail_sections
         WHERE insurance_type = ?
           AND plan_type = ?
-          AND plan_variant = ?
+          AND (plan_variant = ? OR (plan_variant IS NULL AND ? IS NULL))
           AND (medical_expense_type = ? OR (medical_expense_type IS NULL AND ? IS NULL))
           AND (currency_plan = ? OR (currency_plan IS NULL AND ? IS NULL))
           AND is_active = 1
@@ -2451,6 +2549,7 @@ router.post('/api/travel/coverage-details', async (req: Request, res: Response) 
       [
         insurance_type,
         plan_type,
+        planVariant,
         planVariant,
         medicalExpenseType,
         medicalExpenseType,
@@ -2541,19 +2640,47 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
       });
     }
 
-    // 보험기간 계산 (일수)
-    const departure = new Date(departure_date);
-    const arrival = new Date(arrival_date);
-    const diffTime = arrival.getTime() - departure.getTime();
-    const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
-    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
-
-    if (periodDays <= 0) {
+    // 보험기간 계산 (일수): 입력값을 KST로 해석, 부분일은 1일로 올림
+    const departure = parseDateTimeAsKst(departure_date) ?? new Date(departure_date);
+    const arrival = parseDateTimeAsKst(arrival_date) ?? new Date(arrival_date);
+    if (arrival.getTime() <= departure.getTime()) {
       return res.status(400).json({
         success: false,
         message: '도착일시는 출발일시보다 이후여야 합니다.',
       });
     }
+    const diffTime = arrival.getTime() - departure.getTime();
+    const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
+
+    // 1차: 각 피보험자별 만 나이·유효 플랜 계산 (보험나이 15세일 때 성인/어린이 구분)
+    type EffectivePlan = { effectivePlanType: string; manNai: number | null };
+    const effectivePlans: EffectivePlan[] = insured_persons.map((insured: { age?: number; plan_type?: string; birth_date?: string }) => {
+      const age = insured.age;
+      const plan_type = insured.plan_type || '';
+      const birthDate = parseBirthDate(insured.birth_date);
+      let effectivePlanType = plan_type;
+      let manNai: number | null = null;
+      if (age === 15 && birthDate) {
+        manNai = getFullYearsAge(birthDate, departure);
+        if (manNai >= 15) {
+          effectivePlanType = ADULT_PLAN_TYPES.includes(plan_type) ? plan_type : '실속플랜';
+        } else {
+          effectivePlanType = '어린이플랜';
+        }
+      } else if ((age ?? 0) >= 71) {
+        effectivePlanType = plan_type === '어르신플랜2' ? '어르신플랜2' : '어르신플랜1';
+      }
+      return { effectivePlanType, manNai };
+    });
+    // 다른 성인 플랜: 성인(만15+)이 선택한 실속/표준/고보장 중 첫 번째
+    const otherAdultPlan: string | null = effectivePlans.find((_, i) => {
+      const ins = insured_persons[i] as { age?: number; birth_date?: string };
+      const { effectivePlanType, manNai } = effectivePlans[i];
+      const insAge = ins.age ?? 0;
+      const isAdult = insAge > 15 || (insAge === 15 && manNai !== null && manNai >= 15);
+      return isAdult && ADULT_PLAN_TYPES.includes(effectivePlanType);
+    })?.effectivePlanType ?? null;
 
     // 각 피보험자별 보험료 계산
     const results = [];
@@ -2564,8 +2691,6 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
       const { age, gender, plan_type, has_medical_expense, plan_variant } = insured;
       const planVariant = plan_variant || 'B';
 
-      console.log(`피보험자 ${i + 1} 보험료 계산:`, { age, gender, plan_type, has_medical_expense });
-
       // 필수 필드 검증
       if (age === undefined || !gender || !plan_type) {
         return res.status(400).json({
@@ -2574,10 +2699,15 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
         });
       }
 
-      // 나이에 따라 DB plan_type 보정: 71세 이상 어르신플랜1/2
-      const finalPlanType = age >= 71
-        ? (plan_type === '어르신플랜2' ? '어르신플랜2' : '어르신플랜1')
-        : plan_type;
+      const ep = effectivePlans[i];
+      let finalPlanType = ep.effectivePlanType;
+      const manNaiVal = ep.manNai;
+      // 보험나이 15세·만 15세 이상인데 디폴트(실속)로 둔 경우, 다른 성인 플랜이 있으면 따름
+      if (age === 15 && manNaiVal != null && manNaiVal >= 15 && finalPlanType === '실속플랜') {
+        finalPlanType = otherAdultPlan ?? finalPlanType;
+      }
+
+      console.log(`피보험자 ${i + 1} 보험료 계산:`, { age, gender, plan_type: finalPlanType, has_medical_expense });
       const hasMedicalExpenseValue = has_medical_expense ? 1 : 0;
 
       console.log('보험료 조회 조건:', {

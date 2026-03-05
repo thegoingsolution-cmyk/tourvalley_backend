@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
+import { toKstDateTimeStringForApi } from '../utils/dateTime';
 import { generateVerificationCode, sendVerificationSms } from '../services/aligoService';
 import path from 'path';
 import fs from 'fs';
@@ -118,8 +119,8 @@ router.get('/api/contracts/list', async (req: Request, res: Response) => {
       contractNumber: contract.contract_number || '-',
       insuranceType: contract.insurance_type || '-',
       planTypes: contract.plan_types ? contract.plan_types.split(',') : [],
-      departureDate: contract.departure_date,
-      arrivalDate: contract.arrival_date,
+      departureDate: toKstDateTimeStringForApi(contract.departure_date),
+      arrivalDate: toKstDateTimeStringForApi(contract.arrival_date),
       totalPremium: contract.total_premium || 0,
       status: contract.status || '-',
       createdAt: contract.created_at,
@@ -342,8 +343,8 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
       contractNumber: contract.contract_number || '-',
       insuranceType: contract.insurance_type || '-',
       planTypes: contract.plan_types ? contract.plan_types.split(',') : [],
-      departureDate: contract.departure_date,
-      arrivalDate: contract.arrival_date,
+      departureDate: toKstDateTimeStringForApi(contract.departure_date),
+      arrivalDate: toKstDateTimeStringForApi(contract.arrival_date),
       totalPremium: contract.total_premium || 0,
       status: contract.status || '-',
       createdAt: contract.created_at,
@@ -483,8 +484,8 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       id: contract.id,
       contractNumber: contract.contract_number || '-',
       insuranceType: contract.insurance_type || '-',
-      departureDate: contract.departure_date,
-      arrivalDate: contract.arrival_date,
+      departureDate: toKstDateTimeStringForApi(contract.departure_date),
+      arrivalDate: toKstDateTimeStringForApi(contract.arrival_date),
       totalPremium: contract.total_premium || 0,
       status: contract.status || '-',
       createdAt: contract.created_at,

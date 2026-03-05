@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
+import { toKstDateTimeStringForApi } from '../utils/dateTime';
 import { generateAlimTalkMessage } from '../services/alimtalkMessageGenerator';
 import { sendAlimTalk } from '../services/aligoService';
 import multer from 'multer';
@@ -425,8 +426,8 @@ router.get('/api/event-contracts/list', async (req: Request, res: Response) => {
       eventName: contract.event_name || '-',
       eventLocation: contract.event_location || null,
       participants: contract.participants || 0,
-      startDate: contract.start_date,
-      endDate: contract.end_date,
+      startDate: toKstDateTimeStringForApi(contract.start_date),
+      endDate: toKstDateTimeStringForApi(contract.end_date),
       premium: contract.premium || 0,
       status: contract.status || '-',
       createdAt: contract.created_at,

@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import pool from '../config/database';
+import { parseDateTimeAsKst } from '../utils/dateTime';
 
 dotenv.config();
 
@@ -107,11 +108,11 @@ export const calculatePremium = async (
     // 요청된 플랜 타입 그대로 사용 (어린이플랜2 등 유지)
     const finalPlanType = planType;
 
-    // 보험기간 계산 (일수)
-    const departure = new Date(departureDate);
-    const arrival = new Date(arrivalDate);
+    // 보험기간 계산 (일수): KST로 해석, 부분일은 1일로 올림
+    const departure = parseDateTimeAsKst(departureDate) ?? new Date(departureDate);
+    const arrival = parseDateTimeAsKst(arrivalDate) ?? new Date(arrivalDate);
     const diffTime = arrival.getTime() - departure.getTime();
-    const periodDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
     const rateLookup = getRateLookupCriteria(insuranceType, departure, arrival, periodDays);
 
     if (periodDays <= 0) {
