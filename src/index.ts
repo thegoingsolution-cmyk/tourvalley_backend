@@ -27,9 +27,10 @@ import { testConnection } from './config/database';
 const app: Application = express();
 const PORT = process.env.PORT || 4000;
 
-// CORS 허용 도메인 설정
+// CORS 허용 도메인 설정 (프론트: m / www / 루트 도메인 동일 프로젝트)
 const allowedOrigins = [
   'http://localhost:3000',
+  'https://m.tourvalley.net',
   'https://www.tourvalley.net',
   'https://tourvalley.net',
   'https://pay.nicepay.co.kr', // 나이스페이 결제창 → 콜백 리다이렉트 시 Origin

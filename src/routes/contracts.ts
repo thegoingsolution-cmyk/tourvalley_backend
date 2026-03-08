@@ -661,7 +661,8 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
       birth_date, // 개인: 생년월일 (YYYYMMDD)
       company_name, // 법인: 회사명
       business_number, // 법인: 사업자번호
-      phone_number // 휴대폰 번호
+      phone_number, // 휴대폰 번호
+      contract_number: requested_contract_number // 선택: 지정 시 해당 계약만 조회 (없으면 최신 1건)
     } = req.body;
 
     // 필수 파라미터 검증
@@ -715,7 +716,7 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
     let params: any[] = [];
 
     if (member_type === 'I') {
-      // 개인: 회원 + 비회원 모두 검색
+      // 개인: 회원 + 비회원 모두 검색 (contract_number 지정 시 해당 건만)
       query = `
         SELECT tc.id, tc.contract_number, tc.created_at,
                tc.subscription_certificate_url
@@ -737,13 +738,17 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
            AND SUBSTRING(REPLACE(ct.resident_number, '-', ''), 1, 8) = ?)
         )
         AND tc.subscription_certificate_url IS NOT NULL
+        ${requested_contract_number ? 'AND tc.contract_number = ?' : ''}
         ORDER BY tc.created_at DESC
         LIMIT 1
       `;
       // resident_number 형식: 198812-11****** → 하이픈 제거 후 앞 8자리 = YYYYMMDD
       params = [name, inputBirthDate, inputPhone, name, inputPhone, inputBirthDate];
+      if (requested_contract_number) {
+        params.push(String(requested_contract_number).trim());
+      }
     } else {
-      // 법인: 회원 + 비회원 모두 검색
+      // 법인: 회원 + 비회원 모두 검색 (contract_number 지정 시 해당 건만)
       query = `
         SELECT tc.id, tc.contract_number, tc.created_at,
                tc.subscription_certificate_url
@@ -766,10 +771,14 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
            AND REPLACE(ct.mobile_phone, '-', '') = ?)
         )
         AND tc.subscription_certificate_url IS NOT NULL
+        ${requested_contract_number ? 'AND tc.contract_number = ?' : ''}
         ORDER BY tc.created_at DESC
         LIMIT 1
       `;
       params = [company_name, inputBusinessNumber, inputPhone, company_name, inputBusinessNumber, inputPhone];
+      if (requested_contract_number) {
+        params.push(String(requested_contract_number).trim());
+      }
     }
 
     // 🔍 디버깅: 실행할 쿼리 정보
@@ -790,7 +799,7 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
         console.log(`  ${idx + 1}. 계약번호: ${contract.contract_number}`);
         console.log(`     계약ID: ${contract.id}`);
         console.log(`     생성일: ${contract.created_at}`);
-        console.log(`     증서URL: ${contract.subscription_certificate_url ? '있음' : '없음'}`);
+        console.log(`     증서URL: ${contract.subscription_certificate_url ?? '(없음)'}`);
       });
     } else {
       console.log('❌ 일치하는 계약을 찾을 수 없음');
@@ -1142,7 +1151,7 @@ router.post('/api/certificate/verify-code', async (req: Request, res: Response) 
 });
 
 /**
- * 가입증서 파일 다운로드
+ * 가입증서 파일 다운로드 (PDF/이미지 등 저장된 형식 그대로 제공)
  * GET /api/certificate/download/:contractId
  */
 router.get('/api/certificate/download/:contractId', async (req: Request, res: Response) => {
@@ -1197,14 +1206,22 @@ router.get('/api/certificate/download/:contractId', async (req: Request, res: Re
       });
     }
 
-    // 파일명 추출
-    const fileName = path.basename(contract.subscription_certificate_url);
-    const downloadFileName = `가입증서_${contract.contract_number}.pdf`;
+    // 실제 파일 확장자 유지 (pdf 외 이미지 등 그대로 제공)
+    const ext = path.extname(contract.subscription_certificate_url).toLowerCase() || '.pdf';
+    const downloadFileName = `가입증서_${contract.contract_number}${ext}`;
 
-    // 파일 다운로드
-    res.setHeader('Content-Type', 'application/pdf');
+    const mimeByExt: Record<string, string> = {
+      '.pdf': 'application/pdf',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+    };
+    const contentType = mimeByExt[ext] ?? 'application/octet-stream';
+
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadFileName)}"`);
-    
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
 
@@ -1404,7 +1421,7 @@ router.post('/api/event-certificate/send-code', async (req: Request, res: Respon
 });
 
 /**
- * 행사보험 가입증서 파일 다운로드
+ * 행사보험 가입증서 파일 다운로드 (PDF/이미지 등 저장된 형식 그대로 제공)
  * GET /api/event-certificate/download/:contractId
  */
 router.get('/api/event-certificate/download/:contractId', async (req: Request, res: Response) => {
@@ -1459,14 +1476,22 @@ router.get('/api/event-certificate/download/:contractId', async (req: Request, r
       });
     }
 
-    // 파일명 추출
-    const fileName = path.basename(contract.subscription_certificate_url);
-    const downloadFileName = `가입증서_${contract.contract_number}.pdf`;
+    // 실제 파일 확장자 유지 (pdf 외 이미지 등 그대로 제공)
+    const ext = path.extname(contract.subscription_certificate_url).toLowerCase() || '.pdf';
+    const downloadFileName = `가입증서_${contract.contract_number}${ext}`;
 
-    // 파일 다운로드
-    res.setHeader('Content-Type', 'application/pdf');
+    const mimeByExt: Record<string, string> = {
+      '.pdf': 'application/pdf',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+    };
+    const contentType = mimeByExt[ext] ?? 'application/octet-stream';
+
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadFileName)}"`);
-    
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
 

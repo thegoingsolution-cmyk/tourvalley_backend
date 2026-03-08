@@ -377,7 +377,13 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
 
     // 나이스페이 승인 API 호출 (실제 결제 처리)
     // 가상계좌인 경우 payMethod를 포함 (프론트에서 누락될 수 있어 DB도 확인)
-    const approveData: any = { amount: parseInt(amount) };
+    const approveAmount = parseInt(amount);
+    const approveData: any = {
+      amount: approveAmount,
+      taxFreeAmt: approveAmount,
+      supplyAmt: 0,
+      vat: 0,
+    };
     let isPendingVbank = false;
     if (contract_id) {
       const [pendingVbankRows] = await connection.execute<any[]>(
@@ -1080,9 +1086,13 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
     const notifyUrl = `${notifyBaseUrl}/api/payments/nicepay/virtual-account/notify`;
 
     // 가상계좌 발급 요청 (한 번에 처리)
+    const vbankAmount = parseInt(amount);
     const virtualAccountData = {
       orderId,
-      amount: parseInt(amount),
+      amount: vbankAmount,
+      taxFreeAmt: vbankAmount,
+      supplyAmt: 0,
+      vat: 0,
       goodsName: '여행보험료',
       buyerName: buyerName || '',
       buyerEmail: buyerEmail || '',
