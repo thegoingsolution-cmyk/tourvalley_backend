@@ -122,11 +122,21 @@ router.get('/customer-inquiries/:id', async (req: Request, res: Response) => {
   }
 });
 
+// 클라이언트 IP 추출 (프록시 뒤에서 X-Forwarded-For/X-Real-IP 우선, ::ffff: 제거)
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  const raw = typeof forwarded === 'string'
+    ? forwarded.split(',')[0].trim()
+    : (req.headers['x-real-ip'] as string) || req.ip || (req.socket?.remoteAddress ?? '') || '';
+  if (!raw) return '';
+  return raw.replace(/^::ffff:/i, '');
+}
+
 // 고객 질의 등록
 router.post('/customer-inquiries', async (req: Request, res: Response) => {
   try {
     const { title, content, author_name, is_secret, secret_password } = req.body;
-    const ip_address = req.ip || req.connection.remoteAddress || '';
+    const ip_address = getClientIp(req);
 
     if (!title || !content || !author_name) {
       return res.status(400).json({

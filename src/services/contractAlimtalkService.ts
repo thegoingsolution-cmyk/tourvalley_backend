@@ -55,6 +55,8 @@ export const sendContractCompleteAlimTalk = async (
       ctr.name as contractor_name,
       ctr.phone,
       ctr.mobile_phone,
+      ctr.company_name,
+      ctr.contractor_type,
       m.name as member_name,
       m.mobile_phone as member_phone
      FROM travel_contracts tc
@@ -70,23 +72,23 @@ export const sendContractCompleteAlimTalk = async (
   }
 
   const contract = contractRows[0];
-  const customerName = contract.contractor_name || contract.member_name || '';
+  const isB2B = contract.contractor_type === '법인';
+  const customerName = isB2B
+    ? (contract.company_name || contract.contractor_name || contract.member_name || '')
+    : (contract.contractor_name || contract.company_name || contract.member_name || '');
   const receiverPhone = contract.mobile_phone || contract.phone || contract.member_phone || '';
   if (!customerName || !receiverPhone) {
     return;
   }
 
-  // companions 테이블에서 동반인(실제 보험 가입자) 수 조회
-  // 계약자는 실제 보험에 가입하지 않을 수 있음 (명의만 사용)
   const [companionRows] = await pool.execute<any[]>(
-    `SELECT COUNT(*) as companion_count FROM companions WHERE contract_id = ?`,
+    `SELECT name FROM companions WHERE contract_id = ? ORDER BY sequence_number ASC`,
     [contractId]
   );
-  const companionCount = Number(companionRows[0]?.companion_count || 0);
-  
-  // 계약자명 외 동반인 수 표시
+  const companionCount = companionRows?.length ?? 0;
+  const representativeName = companionRows?.[0]?.name?.trim() || customerName;
   const participantSummary =
-    companionCount > 0 ? `${customerName} 외 ${companionCount}명` : customerName;
+    companionCount > 1 ? `${representativeName} 외 ${companionCount - 1}명` : representativeName;
 
   let travelDestination = [contract.travel_region, contract.travel_country]
     .filter((value: string | null) => !!value)
