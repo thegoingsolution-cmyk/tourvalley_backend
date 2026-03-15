@@ -177,6 +177,7 @@ router.post('/api/payments/nicepay/request', async (req: Request, res: Response)
     const {
       contract_id,
       amount,
+      orderId: orderIdFromBody,
       goodsName,
       buyerName,
       buyerEmail,
@@ -188,8 +189,10 @@ router.post('/api/payments/nicepay/request', async (req: Request, res: Response)
     const clientKey = process.env.NICEPAY_CLIENT_KEY || '';
     const timestamp = Date.now().toString();
     
-    // 주문번호 생성 (고유한 값)
-    const orderId = `TC${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+    // 주문번호: 프론트에서 보낸 계약 ID(contract_id) 사용, 없으면 TC... 형식 생성
+    const orderId = orderIdFromBody != null && String(orderIdFromBody).trim()
+      ? String(orderIdFromBody).trim()
+      : `TC${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
 
     // 결제창 호출을 위한 파라미터 반환
     res.json({
