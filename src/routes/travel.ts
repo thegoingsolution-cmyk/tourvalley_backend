@@ -938,6 +938,11 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     // 4. 결제 정보 저장 (use_accident_free_cash: 결제 완료 시 회원 무사고캐시 차감용)
     if (payment) {
       const useAccidentFreeCash = Math.max(0, Number(payment.use_accident_free_cash) || 0);
+      // 무통장입금, 수기카드, 가상계좌는 '기타결제'로 저장하고 payment_sub_method에 저장 (관리자 백엔드와 통일)
+      const isOfflinePayment = payment.payment_sub_method === '수기카드' || payment.payment_sub_method === '무통장입금' || payment.payment_sub_method === '가상계좌';
+      const paymentMethodForDb = isOfflinePayment ? '기타결제' : (payment.payment_method || null);
+      const paymentSubMethodForDb = isOfflinePayment ? payment.payment_sub_method : (payment.payment_sub_method || null);
+
       const [paymentResult] = await connection.execute<any>(
         `INSERT INTO payments (
           contract_id, payment_method, payment_sub_method, amount, status,
@@ -945,8 +950,8 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
-          payment.payment_method,
-          payment.payment_sub_method || null,
+          paymentMethodForDb,
+          paymentSubMethodForDb,
           payment.amount || 0,
           payment.status || '대기',
           payment.status === '완료' ? new Date() : null,
@@ -1794,7 +1799,7 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
           // 계약 상태 업데이트
           await connection.execute(
             `UPDATE travel_contracts 
-             SET payment_status = '결제완료', payment_method = '네이버페이', updated_at = NOW()
+             SET payment_status = '결제완료', payment_method = '네이버페이', status = '가입완료', updated_at = NOW()
              WHERE id = ?`,
             [contractId]
           );
@@ -2180,7 +2185,7 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
         // 계약 상태 업데이트
         await connection.execute(
           `UPDATE travel_contracts 
-           SET payment_status = '결제완료', payment_method = '카카오페이', updated_at = NOW()
+           SET payment_status = '결제완료', payment_method = '카카오페이', status = '가입완료', updated_at = NOW()
            WHERE id = ?`,
           [contract_id]
         );

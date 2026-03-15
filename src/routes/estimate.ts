@@ -232,10 +232,11 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
 
       const insurancePeriod = `${start_date} ${start_hour}시 ~ ${end_date} ${end_hour}시`;
       const insuranceProduct = getInsuranceType(product_cd);
-      // participants는 동반인만 포함, 총인원 = 1 + participants.length. 1명이면 계약자명만, 2명 이상이면 "계약자명 외 (총인원-1)명"
-      const totalParticipants = participants.length + 1;
+      // 가입자 및 인원: 1번 피보험자(DB 저장명) 기준. participants 배열이 전체 인원이므로 총 인원 = participants.length
+      const totalParticipants = participants.length;
+      const firstCompanionName = '보험대상자1';
       const participantSummary =
-        totalParticipants <= 1 ? contractor_name : `${contractor_name} 외 ${totalParticipants - 1}명`;
+        totalParticipants <= 1 ? firstCompanionName : `${firstCompanionName} 외 ${totalParticipants - 1}명`;
 
       const message = generateAlimTalkMessage('estimate_request', {
         customerName: contractor_name,

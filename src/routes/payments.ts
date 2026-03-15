@@ -215,6 +215,30 @@ router.post('/api/payments/nicepay/request', async (req: Request, res: Response)
   }
 });
 
+/** 결제 1건에서 영수증 URL 계산 (나이스/네이버/카카오). 수기카드는 receipt_url 그대로 반환 */
+function resolveReceiptUrlFromPayment(payment: any): string | null {
+  let receiptUrl: string | null = payment.receipt_url || null;
+  let pgResponse = payment.pg_response;
+  if (typeof pgResponse === 'string') {
+    try {
+      pgResponse = JSON.parse(pgResponse);
+    } catch {
+      pgResponse = null;
+    }
+  }
+  if (!receiptUrl && pgResponse) {
+    receiptUrl = extractReceiptUrl(pgResponse);
+    if (!receiptUrl && payment.payment_method === '네이버페이' && pgResponse) {
+      const paymentId = pgResponse?.body?.detail?.paymentId ?? pgResponse?.body?.paymentId ?? pgResponse?.detail?.paymentId;
+      if (paymentId) receiptUrl = buildNaverPayReceiptUrl(pgResponse, paymentId);
+    }
+    if (!receiptUrl && payment.payment_method === '카카오페이' && pgResponse) {
+      receiptUrl = buildKakaoPayReceiptUrl(pgResponse);
+    }
+  }
+  return receiptUrl || null;
+}
+
 // 결제 영수증 URL 조회 (나이스페이/네이버페이/카카오페이)
 router.get('/api/payments/receipt', async (req: Request, res: Response) => {
   try {
@@ -267,32 +291,7 @@ router.get('/api/payments/receipt', async (req: Request, res: Response) => {
       });
     }
 
-    let receiptUrl: string | null = payment.receipt_url || null;
-    let pgResponse = payment.pg_response;
-
-    if (!receiptUrl && pgResponse) {
-      if (typeof pgResponse === 'string') {
-        try {
-          pgResponse = JSON.parse(pgResponse);
-        } catch (error) {
-          pgResponse = null;
-        }
-      }
-
-      receiptUrl = extractReceiptUrl(pgResponse);
-
-      // 네이버페이: apply 응답에는 영수증 URL이 없으므로 paymentId·payHistId로 미리보기 URL 생성
-      if (!receiptUrl && payment.payment_method === '네이버페이' && pgResponse) {
-        const paymentId = pgResponse?.body?.detail?.paymentId ?? pgResponse?.body?.paymentId ?? pgResponse?.detail?.paymentId;
-        if (paymentId) {
-          receiptUrl = buildNaverPayReceiptUrl(pgResponse, paymentId);
-        }
-      }
-      // 카카오페이: 승인 응답에 영수증 URL이 없으므로 tid로 URL 생성
-      if (!receiptUrl && payment.payment_method === '카카오페이' && pgResponse) {
-        receiptUrl = buildKakaoPayReceiptUrl(pgResponse);
-      }
-    }
+    let receiptUrl = resolveReceiptUrlFromPayment(payment);
 
     if (!receiptUrl) {
       return res.status(404).json({
@@ -319,6 +318,79 @@ router.get('/api/payments/receipt', async (req: Request, res: Response) => {
       success: false,
       message: '영수증 정보를 불러오는 중 오류가 발생했습니다.',
     });
+  }
+});
+
+/**
+ * 이메일 등에서 클릭 시 결제 수단별 영수증으로 바로 이동 (302 리다이렉트)
+ * GET /api/payments/receipt-redirect?contract_id=xxx
+ * - contract_id: 내부 id(숫자) 또는 contract_number(예: 250312-123)
+ * - 나이스/네이버/카카오: PG 영수증 URL로 리다이렉트
+ * - 수기 카드: 관리자 업로드 영수증 URL로 리다이렉트
+ * - 무통장 입금: /payments/bank-transfer-receipt 페이지로 리다이렉트
+ */
+router.get('/api/payments/receipt-redirect', async (req: Request, res: Response) => {
+  const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
+  const fallbackUrl = `${frontendUrl}/card-receipt-download`;
+
+  try {
+    const { contract_id } = req.query;
+    if (!contract_id || typeof contract_id !== 'string') {
+      return res.redirect(302, fallbackUrl);
+    }
+
+    let internalContractId: number;
+    const isNumeric = /^\d+$/.test(contract_id);
+    if (isNumeric) {
+      internalContractId = parseInt(contract_id, 10);
+    } else {
+      const [rows] = await pool.execute<any[]>(
+        'SELECT id FROM travel_contracts WHERE contract_number = ?',
+        [contract_id]
+      );
+      if (rows.length === 0) {
+        return res.redirect(302, `${fallbackUrl}?contract_id=${encodeURIComponent(contract_id)}`);
+      }
+      internalContractId = rows[0].id;
+    }
+
+    console.log('[receipt-redirect] contract_id:', contract_id, '→ internalContractId:', internalContractId);
+
+    const [payments] = await pool.execute<any[]>(
+      `SELECT id, payment_method, payment_sub_method, status, receipt_url, pg_response
+       FROM payments WHERE contract_id = ? ORDER BY created_at DESC LIMIT 1`,
+      [internalContractId]
+    );
+
+    if (payments.length === 0) {
+      return res.redirect(302, `${fallbackUrl}?contract_id=${encodeURIComponent(contract_id)}`);
+    }
+
+    const payment = payments[0];
+    const method = payment.payment_method || '';
+    const subMethod = (payment.payment_sub_method || '').trim();
+
+    // 무통장 입금 / 수기 카드 → card-receipt-download 페이지 (생년월일 또는 사업자번호 인증 후 영수증 조회)
+    if (method === '무통장입금' || subMethod === '무통장입금' || (method === '기타결제' && subMethod === '무통장입금')) {
+      return res.redirect(302, `${fallbackUrl}?contract_id=${encodeURIComponent(contract_id)}`);
+    }
+    if (method === '수기카드' || (method === '기타결제' && subMethod === '수기카드')) {
+      return res.redirect(302, `${fallbackUrl}?contract_id=${encodeURIComponent(contract_id)}`);
+    }
+
+    // 나이스페이먼츠, 네이버페이, 카카오페이 → PG 영수증 URL
+    const receiptUrl = resolveReceiptUrlFromPayment(payment);
+    if (receiptUrl) {
+      if (!payment.receipt_url) {
+        await pool.execute('UPDATE payments SET receipt_url = ? WHERE id = ?', [receiptUrl, payment.id]);
+      }
+      return res.redirect(302, receiptUrl);
+    }
+
+    return res.redirect(302, `${fallbackUrl}?contract_id=${encodeURIComponent(contract_id)}`);
+  } catch (error) {
+    console.error('Receipt redirect 오류:', error);
+    return res.redirect(302, fallbackUrl);
   }
 });
 
@@ -358,6 +430,31 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
       authResultMsg,
       mallReserved,
     });
+
+    // 멱등 처리: 이미 동일 orderId로 완료된 결제가 있으면 재승인 API 호출 없이 성공 반환 (모바일 이중 호출 방지)
+    if (orderId && contract_id) {
+      const [existingRows] = await connection.execute<any[]>(
+        `SELECT id, payment_number, pg_transaction_id, pg_response 
+         FROM payments 
+         WHERE contract_id = ? AND (payment_number = ? OR pg_transaction_id = ?) AND status = '완료' 
+         LIMIT 1`,
+        [contract_id, orderId, tid || '']
+      );
+      if (existingRows && existingRows.length > 0) {
+        await connection.rollback();
+        connection.release();
+        console.log('이미 완료된 결제(orderId) - 멱등 반환:', orderId);
+        const existing = existingRows[0];
+        const pgData = existing.pg_response ? JSON.parse(existing.pg_response) : {};
+        return res.json({
+          success: true,
+          payment_id: existing.id,
+          payment_number: orderId,
+          message: '결제가 완료되었습니다.',
+          data: pgData,
+        });
+      }
+    }
 
     // AUTHNICE API 실제 결제 승인 처리
     console.log('✅ AUTHNICE 인증 성공 (authResultCode: 0000)');
@@ -544,7 +641,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
         // 계약 상태 업데이트
         await connection.execute(
           `UPDATE travel_contracts 
-           SET payment_status = '결제완료', payment_method = '나이스페이먼츠'
+           SET payment_status = '결제완료', payment_method = '나이스페이먼츠', status = '가입완료', updated_at = NOW()
            WHERE id = ?`,
           [contract_id]
         );
@@ -1299,7 +1396,7 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
       // 계약 상태 업데이트
       await connection.execute(
         `UPDATE travel_contracts 
-         SET payment_status = '결제완료', payment_method = '기타결제'
+         SET payment_status = '결제완료', payment_method = '기타결제', status = '가입완료', updated_at = NOW()
          WHERE id = ?`,
         [payment.contract_id]
       );

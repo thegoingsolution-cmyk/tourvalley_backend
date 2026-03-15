@@ -1151,8 +1151,257 @@ router.post('/api/certificate/verify-code', async (req: Request, res: Response) 
 });
 
 /**
+ * 이메일 링크 진입 시 contract_id + 본인확인(생년월일/사업자번호)으로 영수증 URL 조회
+ * POST /api/certificate/verify-receipt-by-identity
+ * - contract_number(contract_id) 필수, 휴대폰 인증 없음
+ */
+router.post('/api/certificate/verify-receipt-by-identity', async (req: Request, res: Response) => {
+  try {
+    const {
+      contract_number,
+      member_type,
+      name,
+      birth_date,
+      company_name,
+      business_number,
+    } = req.body;
+
+    if (!contract_number || typeof contract_number !== 'string' || !contract_number.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: '계약번호(contract_id)가 필요합니다.',
+      });
+    }
+
+    const cn = String(contract_number).trim();
+    const inputBirthDate = birth_date ? String(birth_date).replace(/-/g, '') : '';
+    const inputBusinessNumber = business_number ? String(business_number).replace(/-/g, '') : '';
+
+    if (!member_type || (member_type !== 'I' && member_type !== 'C')) {
+      return res.status(400).json({
+        success: false,
+        message: '회원유형(개인/법인)을 선택해주세요.',
+      });
+    }
+
+    let query = '';
+    let params: any[] = [];
+
+    if (member_type === 'I') {
+      if (!birth_date || inputBirthDate.length !== 8) {
+        return res.status(400).json({
+          success: false,
+          message: '생년월일(8자리)을 입력해주세요.',
+        });
+      }
+      query = `
+        SELECT tc.id FROM travel_contracts tc
+        LEFT JOIN members m ON tc.member_id = m.id
+        LEFT JOIN contractors ct ON tc.id = ct.contract_id
+        WHERE tc.contract_number = ?
+        AND (
+          (tc.member_id IS NOT NULL AND REPLACE(m.birth_date, '-', '') = ?)
+          OR
+          (tc.member_id IS NULL AND ct.contractor_type = '개인' AND SUBSTRING(REPLACE(ct.resident_number, '-', ''), 1, 8) = ?)
+        )
+        LIMIT 1
+      `;
+      params = [cn, inputBirthDate, inputBirthDate];
+    } else {
+      if (!business_number || inputBusinessNumber.length < 10) {
+        return res.status(400).json({
+          success: false,
+          message: '사업자번호를 입력해주세요.',
+        });
+      }
+      query = `
+        SELECT tc.id FROM travel_contracts tc
+        LEFT JOIN members m ON tc.member_id = m.id
+        LEFT JOIN corporate_members cm ON m.id = cm.member_id
+        LEFT JOIN contractors ct ON tc.id = ct.contract_id
+        WHERE tc.contract_number = ?
+        AND (
+          (tc.member_id IS NOT NULL AND REPLACE(cm.business_number, '-', '') = ?)
+          OR
+          (tc.member_id IS NULL AND ct.contractor_type = '법인' AND REPLACE(ct.business_number, '-', '') = ?)
+        )
+        LIMIT 1
+      `;
+      params = [cn, inputBusinessNumber, inputBusinessNumber];
+    }
+
+    const [contracts] = await pool.execute<any[]>(query, params);
+    if (contracts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '입력하신 정보와 일치하는 계약을 찾을 수 없습니다.',
+      });
+    }
+
+    const internalContractId = contracts[0].id;
+    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+
+    const [payments] = await pool.execute<any[]>(
+      `SELECT id, payment_method, payment_sub_method, status, receipt_url
+       FROM payments WHERE contract_id = ? ORDER BY created_at DESC LIMIT 1`,
+      [internalContractId]
+    );
+
+    if (payments.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '결제 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const payment = payments[0];
+    const method = (payment.payment_method || '').trim();
+    const subMethod = (payment.payment_sub_method || '').trim();
+
+    // 무통장입금 → 입금확인증 페이지
+    if (method === '무통장입금' || subMethod === '무통장입금' || (method === '기타결제' && subMethod === '무통장입금')) {
+      return res.json({
+        success: true,
+        receiptUrl: `${frontendUrl}/payments/bank-transfer-receipt?contractId=${internalContractId}`,
+      });
+    }
+
+    // 수기카드 → 관리자 업로드 영수증 URL
+    if (method === '수기카드' || (method === '기타결제' && subMethod === '수기카드')) {
+      const url = (payment.receipt_url || '').trim();
+      if (!url) {
+        return res.status(404).json({
+          success: false,
+          message: '영수증 정보를 찾을 수 없습니다.',
+        });
+      }
+      const fullUrl = url.startsWith('http') ? url : `${frontendUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+      return res.json({
+        success: true,
+        receiptUrl: fullUrl,
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: '해당 결제 수단의 영수증은 이 경로에서 조회할 수 없습니다.',
+    });
+  } catch (error) {
+    console.error('영수증 본인확인 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '처리 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+/**
+ * 이메일 링크 진입 시 contract_id + 본인확인(생년월일/사업자번호)으로 가입증명서 다운로드용 계약 ID 조회
+ * POST /api/certificate/verify-by-identity
+ * - contract_number(contract_id) 필수, 휴대폰 인증 없음
+ */
+router.post('/api/certificate/verify-by-identity', async (req: Request, res: Response) => {
+  try {
+    const {
+      contract_number,
+      member_type,
+      name,
+      birth_date,
+      company_name,
+      business_number,
+    } = req.body;
+
+    if (!contract_number || typeof contract_number !== 'string' || !contract_number.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: '계약번호(contract_id)가 필요합니다.',
+      });
+    }
+
+    const cn = String(contract_number).trim();
+    const inputBirthDate = birth_date ? String(birth_date).replace(/-/g, '') : '';
+    const inputBusinessNumber = business_number ? String(business_number).replace(/-/g, '') : '';
+
+    if (!member_type || (member_type !== 'I' && member_type !== 'C')) {
+      return res.status(400).json({
+        success: false,
+        message: '회원유형(개인/법인)을 선택해주세요.',
+      });
+    }
+
+    let query = '';
+    let params: any[] = [];
+
+    if (member_type === 'I') {
+      if (!birth_date || inputBirthDate.length !== 8) {
+        return res.status(400).json({
+          success: false,
+          message: '생년월일(8자리)을 입력해주세요.',
+        });
+      }
+      query = `
+        SELECT tc.id FROM travel_contracts tc
+        LEFT JOIN members m ON tc.member_id = m.id
+        LEFT JOIN contractors ct ON tc.id = ct.contract_id
+        WHERE tc.contract_number = ?
+        AND (
+          (tc.member_id IS NOT NULL AND REPLACE(m.birth_date, '-', '') = ?)
+          OR
+          (tc.member_id IS NULL AND ct.contractor_type = '개인' AND SUBSTRING(REPLACE(ct.resident_number, '-', ''), 1, 8) = ?)
+        )
+        LIMIT 1
+      `;
+      params = [cn, inputBirthDate, inputBirthDate];
+    } else {
+      if (!business_number || inputBusinessNumber.length < 10) {
+        return res.status(400).json({
+          success: false,
+          message: '사업자번호를 입력해주세요.',
+        });
+      }
+      query = `
+        SELECT tc.id FROM travel_contracts tc
+        LEFT JOIN members m ON tc.member_id = m.id
+        LEFT JOIN corporate_members cm ON m.id = cm.member_id
+        LEFT JOIN contractors ct ON tc.id = ct.contract_id
+        WHERE tc.contract_number = ?
+        AND (
+          (tc.member_id IS NOT NULL AND REPLACE(cm.business_number, '-', '') = ?)
+          OR
+          (tc.member_id IS NULL AND ct.contractor_type = '법인' AND REPLACE(ct.business_number, '-', '') = ?)
+        )
+        LIMIT 1
+      `;
+      params = [cn, inputBusinessNumber, inputBusinessNumber];
+    }
+
+    const [contracts] = await pool.execute<any[]>(query, params);
+    if (contracts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '입력하신 정보와 일치하는 계약을 찾을 수 없습니다.',
+      });
+    }
+
+    const internalContractId = contracts[0].id;
+
+    return res.json({
+      success: true,
+      contractId: internalContractId,
+    });
+  } catch (error) {
+    console.error('가입증명서 본인확인 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '처리 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+/**
  * 가입증서 파일 다운로드 (PDF/이미지 등 저장된 형식 그대로 제공)
  * GET /api/certificate/download/:contractId
+ * - contractId: 내부 id(숫자) 또는 contract_number(예: 250312-123) 모두 지원
  */
 router.get('/api/certificate/download/:contractId', async (req: Request, res: Response) => {
   try {
@@ -1165,9 +1414,12 @@ router.get('/api/certificate/download/:contractId', async (req: Request, res: Re
       });
     }
 
-    // 계약 정보 조회
+    // 숫자만 있으면 id로, 아니면 contract_number로 조회 (이메일 등에서 contract_number 전달 대비)
+    const isNumericId = /^\d+$/.test(contractId);
     const [contracts] = await pool.execute<any[]>(
-      'SELECT subscription_certificate_url, contract_number FROM travel_contracts WHERE id = ?',
+      isNumericId
+        ? 'SELECT subscription_certificate_url, contract_number FROM travel_contracts WHERE id = ?'
+        : 'SELECT subscription_certificate_url, contract_number FROM travel_contracts WHERE contract_number = ?',
       [contractId]
     );
 

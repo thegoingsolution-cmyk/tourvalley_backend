@@ -9,10 +9,10 @@ import fs from 'fs';
 
 const router = Router();
 
-// 업로드 기본 경로 설정
-// 프로덕션: /home/b2c/uploads/
-// 로컬 개발: 프로젝트 내부 uploads 폴더
-const UPLOAD_BASE_PATH = process.env.UPLOAD_PATH || path.join(process.cwd(), 'uploads');
+// 업로드 기본 경로 설정 (upload.ts와 동일하게 맞춤)
+// 프로덕션: UPLOAD_PATH=/home/b2c/uploads 환경변수 설정 필요
+// nginx: location /uploads/ { alias /home/b2c/uploads/; } 로 정적 파일 서빙
+const UPLOAD_BASE_PATH = process.env.UPLOAD_PATH || path.resolve(__dirname, '../../../uploads');
 
 // 업로드 디렉토리 생성 (business, contracts)
 const businessDir = path.join(UPLOAD_BASE_PATH, 'business');
@@ -176,15 +176,38 @@ router.post('/api/event-insurance/estimate', upload.fields([
     console.log('=== 행사보험 견적 신청 시작 ===');
     console.log('Body:', req.body);
     console.log('Files:', req.files);
+    console.log('UPLOAD_BASE_PATH:', UPLOAD_BASE_PATH);
+    console.log('businessDir:', businessDir);
+    console.log('contractsDir:', contractsDir);
 
     const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-    
+
+    // 파일 실제 저장 여부 검증 및 로깅
+    if (files?.license?.[0]) {
+      const lic = files.license[0];
+      const licPath = (lic as any).path || path.join(businessDir, lic.filename);
+      const licExists = fs.existsSync(licPath);
+      console.log('[license] 저장경로:', licPath, '| 파일존재:', licExists);
+      if (!licExists) {
+        console.error('[license] 파일 저장 실패 - 경로에 파일이 없습니다:', licPath);
+      }
+    }
+    if (files?.overview?.[0]) {
+      const ov = files.overview[0];
+      const ovPath = (ov as any).path || path.join(contractsDir, ov.filename);
+      const ovExists = fs.existsSync(ovPath);
+      console.log('[overview] 저장경로:', ovPath, '| 파일존재:', ovExists);
+      if (!ovExists) {
+        console.error('[overview] 파일 저장 실패 - 경로에 파일이 없습니다:', ovPath);
+      }
+    }
+
     // 파일 경로 (nginx 설정에 맞춰 /uploads/ 경로 사용)
-    const licenseFile = files?.license 
-      ? `/uploads/business/${files.license[0].filename}` 
+    const licenseFile = files?.license
+      ? `/uploads/business/${files.license[0].filename}`
       : null;
-    const overviewFile = files?.overview 
-      ? `/uploads/contracts/${files.overview[0].filename}` 
+    const overviewFile = files?.overview
+      ? `/uploads/contracts/${files.overview[0].filename}`
       : null;
 
     const contract_number = generateContractNumber();
@@ -328,6 +351,31 @@ router.post('/api/event-insurance/estimate', upload.fields([
   } finally {
     connection.release();
   }
+});
+
+// multer 에러 핸들링 (파일 크기 초과, 확장자 오류 등)
+router.use((err: any, req: Request, res: Response, next: any) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({
+        success: false,
+        message: '파일 크기는 10MB를 초과할 수 없습니다.',
+      });
+    }
+    if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      return res.status(400).json({
+        success: false,
+        message: '예상치 못한 파일 필드입니다.',
+      });
+    }
+  }
+  if (err?.message?.includes('확장자')) {
+    return res.status(400).json({
+      success: false,
+      message: err.message || '업로드할 수 없는 파일 형식입니다.',
+    });
+  }
+  next(err);
 });
 
 // 행사보험 계약 목록 조회

@@ -25,16 +25,15 @@ router.get('/api/mileage/info', async (req: Request, res: Response) => {
     }
 
     // 현재 사용 가능한 마일리지 조회
-    // members 테이블의 mileage 컬럼에서 조회하거나,
-    // mileage_transactions에서 계산
+    // members 테이블의 mileage 컬럼을 기준으로 조회
     const [mileageResult] = await pool.execute<any[]>(
-      `SELECT COALESCE(SUM(CASE WHEN type = 'earn' THEN amount ELSE -amount END), 0) as total_mileage
-      FROM mileage_transactions
-      WHERE member_id = ?`,
+      `SELECT COALESCE(mileage, 0) as total_mileage
+       FROM members
+       WHERE id = ?`,
       [memberId]
     );
 
-    const totalMileage = parseFloat(mileageResult[0]?.total_mileage || '0');
+    const totalMileage = mileageResult[0]?.total_mileage ?? 0;
 
     res.json({
       success: true,
@@ -204,9 +203,9 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
       });
     }
 
-    // 회원 존재 여부 확인
+    // 회원 존재 여부 + 현재 마일리지 확인 (신뢰 기준: members.mileage)
     const [memberCheck] = await connection.execute<any[]>(
-      `SELECT id FROM members WHERE id = ?`,
+      `SELECT id, COALESCE(mileage, 0) as mileage FROM members WHERE id = ?`,
       [memberId]
     );
 
@@ -217,15 +216,7 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
       });
     }
 
-    // 현재 마일리지 확인 (mileage_transactions에서 계산)
-    const [mileageResult] = await connection.execute<any[]>(
-      `SELECT COALESCE(SUM(CASE WHEN type = 'earn' THEN amount ELSE -amount END), 0) as total_mileage
-      FROM mileage_transactions
-      WHERE member_id = ?`,
-      [memberId]
-    );
-
-    const currentMileage = Math.floor(parseFloat(mileageResult[0]?.total_mileage || '0'));
+    const currentMileage = Math.floor(parseFloat(String(memberCheck[0]?.mileage ?? '0')));
 
     if (currentMileage < total_mileage) {
       return res.status(400).json({
