@@ -407,14 +407,12 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
       });
     }
 
-    // 이미 적립했는지 확인
+    // 이미 적립했는지 확인 (contract_id 또는 reason_detail로 검색)
     const [existingResult] = await pool.execute<any[]>(
       `SELECT id FROM accident_free_cash_history
-      WHERE member_id = ? 
-        AND reason LIKE '%보험기간 종료 후 무사고캐시 적립%'
-        AND reason_detail LIKE ?
-        AND type = '충전'`,
-      [memberId, `%계약번호: ${contractId}%`]
+      WHERE member_id = ? AND type = '충전'
+        AND (contract_id = ? OR reason_detail LIKE ?)`,
+      [memberId, contractId, `%계약번호: ${contractId}%`]
     );
 
     if (existingResult && existingResult.length > 0) {
@@ -452,17 +450,18 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
     await connection.beginTransaction();
 
     try {
-      // 무사고캐시 이력 추가
+      // 무사고캐시 이력 추가 (contract_id 저장 → 조회 성능용)
       await connection.execute(
         `INSERT INTO accident_free_cash_history 
-        (member_id, type, amount, balance, reason, reason_detail, created_at)
-        VALUES (?, '충전', ?, ?, ?, ?, NOW())`,
+        (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
+        VALUES (?, '충전', ?, ?, ?, ?, ?, NOW())`,
         [
           memberId,
           cashAmountRounded,
           newBalance,
           '보험기간 종료 후 무사고캐시 적립',
           `${contract.insurance_type} 계약번호: ${contractId}`,
+          contractId,
         ]
       );
 

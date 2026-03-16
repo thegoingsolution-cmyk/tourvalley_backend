@@ -707,9 +707,9 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
           );
           const contractNumber = contractNumRows[0]?.contract_number || String(contract_id);
           await connection.execute(
-            `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
-             VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
-            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`]
+            `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
+             VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
+            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`, contract_id]
           );
         }
 
@@ -1459,9 +1459,9 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
         );
         const contractNumber = contractNumRows[0]?.contract_number || String(payment.contract_id);
         await connection.execute(
-          `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
-           VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
-          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`]
+          `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
+           VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
+          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`, payment.contract_id]
         );
       }
 

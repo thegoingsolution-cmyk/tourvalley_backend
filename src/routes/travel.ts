@@ -1055,9 +1055,9 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
           [newCashBalance, contract.member_id]
         );
         await connection.execute(
-          `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
-           VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
-          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contract_number}`]
+          `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
+           VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
+          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contract_number}`, contract_id]
         );
       }
     }
@@ -1635,6 +1635,9 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
         // 보험사 가맹점: 클라이언트 oPay.open() 시 purchaserName / purchaserBirthday 로 전달 권장
         purchaserName: resolvedPurchaserName,
         purchaserBirthday: resolvedPurchaserBirthday,
+        // 면세점: 전액 비과세 (프론트에서 네이버페이 주문/결제 시 사용)
+        taxFreeAmount: Math.round(amount),
+        productTaxType: 'TAX_FREE',
       },
     });
   } catch (error) {
@@ -1884,9 +1887,9 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
             );
             const contractNumber = contractNumRows[0]?.contract_number || String(contractId);
             await connection.execute(
-              `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
-               VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
-              [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`]
+              `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
+               VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
+              [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`, contractId]
             );
           }
 
@@ -1990,7 +1993,8 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
       // 카카오페이 결제 준비 API 호출 (신 카카오페이 API)
       const kakaoPayApiUrl = 'https://open-api.kakaopay.com/online/v1/payment/ready';
       
-      // JSON 형식으로 요청 데이터 준비
+      // 면세점: 전액 비과세 (tax_free_amount = 결제금액, vat_amount = 0)
+      const totalAmount = Math.round(amount);
       const requestBody = {
         cid: kakaoPayCid,
         cid_secret: kakaoPayClientSecret,
@@ -1998,8 +2002,9 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
         partner_user_id: String(contractId),
         item_name: itemName,
         quantity: quantity || 1,
-        total_amount: Math.round(amount),
-        tax_free_amount: 0,
+        total_amount: totalAmount,
+        tax_free_amount: totalAmount,
+        vat_amount: 0,
         approval_url: `${apiBaseUrl}/api/travel/kakao-pay-callback?partner_order_id=${orderId}&partner_user_id=${contractId}`,
         cancel_url: `${frontendBaseUrl}/payment/cancel`,
         fail_url: `${frontendBaseUrl}/payment/fail`,
@@ -2268,9 +2273,9 @@ router.get('/api/travel/kakao-pay-callback', async (req: Request, res: Response)
           );
           const contractNumber = contractNumRows[0]?.contract_number || String(contract_id);
           await connection.execute(
-            `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, created_at)
-             VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, NOW())`,
-            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`]
+            `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
+             VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
+            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`, contract_id]
           );
         }
 
