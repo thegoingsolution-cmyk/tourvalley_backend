@@ -9,7 +9,8 @@ import {
   updateCorporateMember,
   findMemberUsername,
   verifyResetPasswordIdentity,
-  updateMemberPasswordWithIdentity
+  updateMemberPasswordWithIdentity,
+  withdrawMember
 } from '../services/authService';
 
 const router = Router();
@@ -557,6 +558,37 @@ router.put('/corporate/:memberId', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: '법인회원 정보 수정에 실패했습니다.',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/withdraw/:id
+ * 회원 탈퇴 (soft delete)
+ */
+router.post('/withdraw/:id', async (req: Request, res: Response) => {
+  try {
+    const memberId = parseInt(req.params.id, 10);
+
+    if (isNaN(memberId)) {
+      return res.status(400).json({
+        success: false,
+        message: '잘못된 회원 ID입니다.',
+      });
+    }
+
+    const result = await withdrawMember(memberId);
+
+    if (result.success) {
+      return res.json(result);
+    }
+
+    return res.status(400).json(result);
+  } catch (error) {
+    console.error('회원 탈퇴 API 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: '회원 탈퇴에 실패했습니다.',
     });
   }
 });

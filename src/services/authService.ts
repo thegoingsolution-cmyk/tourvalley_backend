@@ -173,7 +173,7 @@ export const loginMember = async (username: string, password: string): Promise<{
 // 아이디 중복 확인
 export const checkUsernameExists = async (username: string): Promise<boolean> => {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    'SELECT id FROM members WHERE username = ?',
+    "SELECT id FROM members WHERE username = ? AND status <> '탈퇴'",
     [username]
   );
   return rows.length > 0;
@@ -1029,6 +1029,39 @@ export const updateCorporateMember = async (
     throw error;
   } finally {
     connection.release();
+  }
+};
+
+// 회원 탈퇴 (soft delete)
+export const withdrawMember = async (
+  memberId: number,
+): Promise<{ success: boolean; message: string }> => {
+  try {
+    const [result] = await pool.execute<ResultSetHeader>(
+      `UPDATE members
+       SET status = '탈퇴', updated_at = NOW()
+       WHERE id = ? AND status <> '탈퇴'`,
+      [memberId],
+    );
+
+    if (result.affectedRows === 0) {
+      const [rows] = await pool.execute<RowDataPacket[]>(
+        'SELECT id FROM members WHERE id = ?',
+        [memberId],
+      );
+
+      if (rows.length === 0) {
+        return { success: false, message: '회원 정보를 찾을 수 없습니다.' };
+      }
+
+      return { success: false, message: '이미 탈퇴 처리된 계정입니다.' };
+    }
+
+    console.log(`✅ 회원 탈퇴 처리 완료: 회원 ID ${memberId}`);
+    return { success: true, message: '회원 탈퇴가 완료되었습니다.' };
+  } catch (error) {
+    console.error('회원 탈퇴 처리 오류:', error);
+    throw error;
   }
 };
 
