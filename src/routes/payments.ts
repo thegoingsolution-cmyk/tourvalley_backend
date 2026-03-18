@@ -619,13 +619,21 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
         });
       } else {
         console.log('✅ 나이스페이 실제 결제 승인 성공!');
-        // 신용카드 결제 성공
+        // 신용카드 결제 성공 — 대기 건의 무사고캐시 사용액을 완료 건에 반영
+        const [pendingRows] = await connection.execute<any[]>(
+          `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? AND status = '대기' ORDER BY id ASC LIMIT 1`,
+          [contract_id]
+        );
+        const useAccidentFreeCash = pendingRows[0]?.use_accident_free_cash != null
+          ? Math.max(0, Number(pendingRows[0].use_accident_free_cash))
+          : 0;
+
         const receiptUrl = extractReceiptUrl(nicepayResponse.data);
         const [paymentResult] = await connection.execute<any>(
           `INSERT INTO payments (
             contract_id, payment_method, amount, status, payment_date,
-            payment_number, pg_transaction_id, pg_response, receipt_url
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            payment_number, pg_transaction_id, pg_response, receipt_url, use_accident_free_cash
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             contract_id,
             '나이스페이먼츠',
@@ -636,6 +644,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
             tid,
             JSON.stringify(nicepayResponse.data),
             receiptUrl,
+            useAccidentFreeCash,
           ]
         );
 
@@ -682,14 +691,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
           );
         }
 
-        // 무사고캐시 사용분 차감 (계약 등록 시 저장한 use_accident_free_cash)
-        const [pendingPaymentRows] = await connection.execute<any[]>(
-          `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? AND status = '대기' ORDER BY id ASC LIMIT 1`,
-          [contract_id]
-        );
-        const useAccidentFreeCash = pendingPaymentRows[0]?.use_accident_free_cash != null
-          ? Math.max(0, Number(pendingPaymentRows[0].use_accident_free_cash))
-          : 0;
+        // 무사고캐시 사용분 차감 (위에서 조회한 useAccidentFreeCash 사용)
         if (useAccidentFreeCash > 0 && contract?.member_id) {
           const [memberRows] = await connection.execute<any[]>(
             `SELECT accident_free_cash FROM members WHERE id = ?`,
@@ -701,15 +703,11 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
             `UPDATE members SET accident_free_cash = ?, updated_at = NOW() WHERE id = ?`,
             [newCashBalance, contract.member_id]
           );
-          const [contractNumRows] = await connection.execute<any[]>(
-            `SELECT contract_number FROM travel_contracts WHERE id = ?`,
-            [contract_id]
-          );
-          const contractNumber = contractNumRows[0]?.contract_number || String(contract_id);
+          // reason_detail에 travel_contracts.id(계약 ID) 값 저장
           await connection.execute(
             `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
              VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
-            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`, contract_id]
+            [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contract_id}`, contract_id]
           );
         }
 
@@ -1233,13 +1231,22 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
 
       const tid = nicepayResponse.data.tid || '';
       
+      // 대기 건(계약 등록 시 생성)의 무사고캐시 사용액을 이 행에도 반영 (입금 완료 시 같은 행이 완료로 UPDATE됨)
+      const [vbankPendingRows] = await connection.execute<any[]>(
+        `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? AND status = '대기' ORDER BY id ASC LIMIT 1`,
+        [contract_id]
+      );
+      const vbankUseAccidentFreeCash = vbankPendingRows[0]?.use_accident_free_cash != null
+        ? Math.max(0, Number(vbankPendingRows[0].use_accident_free_cash))
+        : 0;
+
       // 결제 정보 저장 (상태: 대기)
       const receiptUrl = extractReceiptUrl(nicepayResponse.data);
       const [paymentResult] = await connection.execute<any>(
         `INSERT INTO payments (
           contract_id, payment_method, payment_sub_method, amount, status,
-          payment_number, pg_transaction_id, pg_response, bank_name, account_number, receipt_url
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          payment_number, pg_transaction_id, pg_response, bank_name, account_number, receipt_url, use_accident_free_cash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contract_id,
           '기타결제',
@@ -1252,6 +1259,7 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
           bankName,
           accountNumber,
           receiptUrl,
+          vbankUseAccidentFreeCash,
         ]
       );
 
@@ -1453,15 +1461,11 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
           `UPDATE members SET accident_free_cash = ?, updated_at = NOW() WHERE id = ?`,
           [newCashBalance, contract.member_id]
         );
-        const [contractNumRows] = await connection.execute<any[]>(
-          `SELECT contract_number FROM travel_contracts WHERE id = ?`,
-          [payment.contract_id]
-        );
-        const contractNumber = contractNumRows[0]?.contract_number || String(payment.contract_id);
+        // reason_detail에 travel_contracts.id(계약 ID) 값 저장
         await connection.execute(
           `INSERT INTO accident_free_cash_history (member_id, type, amount, balance, reason, reason_detail, contract_id, created_at)
            VALUES (?, '사용', ?, ?, '보험료 결제 시 무사고캐시 사용', ?, ?, NOW())`,
-          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${contractNumber}`, payment.contract_id]
+          [contract.member_id, useAccidentFreeCash, newCashBalance, `계약번호: ${payment.contract_id}`, payment.contract_id]
         );
       }
 

@@ -34,12 +34,23 @@ router.get('/api/cash/info', async (req: Request, res: Response) => {
     }
 
     // 무사고캐시 총액 조회 (현재 사용 가능한 캐시)
-    // members 테이블의 accident_free_cash 컬럼에서 조회하거나, 
-    // accident_free_cash_history에서 계산
+    // - 법인/단체 계약(계약자 유형=법인)에서 적립된 충전 내역은 개인 캐시에 포함되면 안 됨
+    // - contract_id는 충전(type='충전')에만 백필/저장되어 있으므로, 충전 내역에 대해서만 계약자 유형을 필터링
     const [cashResult] = await pool.execute<any[]>(
-      `SELECT COALESCE(SUM(CASE WHEN type = '충전' THEN amount ELSE -amount END), 0) as total_cash
-      FROM accident_free_cash_history
-      WHERE member_id = ?`,
+      `SELECT COALESCE(SUM(CASE WHEN afch.type = '충전' THEN afch.amount ELSE -afch.amount END), 0) as total_cash
+      FROM accident_free_cash_history afch
+      WHERE afch.member_id = ?
+        AND (
+          afch.type != '충전'
+          OR afch.contract_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM contractors ct
+            WHERE ct.contract_id = afch.contract_id
+              AND ct.contractor_type = '개인'
+            LIMIT 1
+          )
+        )`,
       [memberId]
     );
 
@@ -115,6 +126,7 @@ router.get('/api/cash/list', async (req: Request, res: Response) => {
     const endDateStr = formatDateForMySQL(endDate);
 
     // 무사고캐시 내역 조회
+    // - 개인 캐시 화면에서는 법인/단체 계약 기반 충전 내역을 숨김
     const [cashHistory] = await pool.execute<any[]>(
       `SELECT 
         id,
@@ -128,6 +140,17 @@ router.get('/api/cash/list', async (req: Request, res: Response) => {
       WHERE member_id = ? 
         AND created_at >= ? 
         AND created_at <= ?
+        AND (
+          type != '충전'
+          OR contract_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM contractors ct
+            WHERE ct.contract_id = accident_free_cash_history.contract_id
+              AND ct.contractor_type = '개인'
+            LIMIT 1
+          )
+        )
       ORDER BY created_at DESC
       LIMIT ${limitValue} OFFSET ${offsetValue}`,
       [memberId, startDateStr, endDateStr]
@@ -139,7 +162,18 @@ router.get('/api/cash/list', async (req: Request, res: Response) => {
       FROM accident_free_cash_history
       WHERE member_id = ? 
         AND created_at >= ? 
-        AND created_at <= ?`,
+        AND created_at <= ?
+        AND (
+          type != '충전'
+          OR contract_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM contractors ct
+            WHERE ct.contract_id = accident_free_cash_history.contract_id
+              AND ct.contractor_type = '개인'
+            LIMIT 1
+          )
+        )`,
       [memberId, startDateStr, endDateStr]
     );
 
@@ -266,7 +300,14 @@ router.get('/api/cash/eligible-contracts', async (req: Request, res: Response) =
       AND tc.insurance_type IN ('해외여행보험', '국내여행보험')
       AND tc.arrival_date < ?
       AND tc.arrival_date >= ?
-      AND tc.payment_status = '결제완료'`;
+      AND tc.payment_status = '결제완료'
+      AND EXISTS (
+        SELECT 1
+        FROM contractors ct
+        WHERE ct.contract_id = tc.id
+          AND ct.contractor_type = '개인'
+        LIMIT 1
+      )`;
 
     if (accumulatedContractIds.size > 0) {
       const ids = Array.from(accumulatedContractIds).join(',');
@@ -386,6 +427,22 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
 
     const contract = contractResult[0];
 
+    // 단체(법인) 계약은 개인 무사고캐시 적립 대상이 아님
+    const [contractorCheck] = await pool.execute<any[]>(
+      `SELECT 1
+      FROM contractors
+      WHERE contract_id = ?
+        AND contractor_type = '개인'
+      LIMIT 1`,
+      [contractId]
+    );
+    if (!contractorCheck || contractorCheck.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '법인/단체 계약은 무사고캐시 적립 대상이 아닙니다.',
+      });
+    }
+
     // 보험 종류 확인
     if (!['해외여행보험', '국내여행보험'].includes(contract.insurance_type)) {
       return res.status(400).json({
@@ -436,9 +493,20 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
 
     // 현재 잔액 조회
     const [balanceResult] = await pool.execute<any[]>(
-      `SELECT COALESCE(SUM(CASE WHEN type = '충전' THEN amount ELSE -amount END), 0) as balance
-      FROM accident_free_cash_history
-      WHERE member_id = ?`,
+      `SELECT COALESCE(SUM(CASE WHEN afch.type = '충전' THEN afch.amount ELSE -afch.amount END), 0) as balance
+      FROM accident_free_cash_history afch
+      WHERE afch.member_id = ?
+        AND (
+          afch.type != '충전'
+          OR afch.contract_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM contractors ct
+            WHERE ct.contract_id = afch.contract_id
+              AND ct.contractor_type = '개인'
+            LIMIT 1
+          )
+        )`,
       [memberId]
     );
 
