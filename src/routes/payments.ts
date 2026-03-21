@@ -448,7 +448,25 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
         connection.release();
         console.log('이미 완료된 결제(orderId) - 멱등 반환:', orderId);
         const existing = existingRows[0];
-        const pgData = existing.pg_response ? JSON.parse(existing.pg_response) : {};
+        // MySQL JSON 컬럼(pg_response)은 드라이버/환경에 따라 이미 object로 내려올 수 있어
+        // 문자열일 때만 JSON.parse를 수행하도록 방어합니다.
+        let pgData: any = {};
+        const rawPgResponse = existing.pg_response;
+        if (rawPgResponse) {
+          if (typeof rawPgResponse === 'string') {
+            try {
+              pgData = JSON.parse(rawPgResponse);
+            } catch (parseError) {
+              console.warn('멱등(pg_response) JSON.parse 실패, rawPgResponse를 무시합니다.', {
+                orderId,
+                error: (parseError as Error)?.message,
+              });
+              pgData = {};
+            }
+          } else if (typeof rawPgResponse === 'object') {
+            pgData = rawPgResponse;
+          }
+        }
         return res.json({
           success: true,
           payment_id: existing.id,

@@ -393,6 +393,23 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       });
     }
 
+    const memberIdParam = (req.query.member_id ?? req.query.memberId) as
+      | string
+      | undefined;
+    if (!memberIdParam) {
+      return res.status(401).json({
+        success: false,
+        message: '인증이 필요합니다.',
+      });
+    }
+    const memberId = parseInt(memberIdParam, 10);
+    if (Number.isNaN(memberId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 member_id입니다.',
+      });
+    }
+
     // 계약 상세 정보 조회
     const [contracts] = await pool.execute<any[]>(
       `SELECT 
@@ -415,8 +432,8 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       FROM travel_contracts tc
       LEFT JOIN members m ON tc.member_id = m.id
       LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
-      WHERE tc.id = ?`,
-      [contractId]
+      WHERE tc.id = ? AND tc.member_id = ?`,
+      [contractId, memberId]
     );
 
     if (contracts.length === 0) {
@@ -553,21 +570,42 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
       });
     }
 
+    const memberIdParam = (req.query.member_id ?? req.query.memberId) as
+      | string
+      | undefined;
+    if (!memberIdParam) {
+      return res.status(401).json({
+        success: false,
+        message: '인증이 필요합니다.',
+      });
+    }
+    const memberId = parseInt(memberIdParam, 10);
+    if (Number.isNaN(memberId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 member_id입니다.',
+      });
+    }
+
     // 피보험자 정보 조회 (companions 테이블에서 직접 조회)
     const [companionsData] = await pool.execute<any[]>(
       `SELECT 
         c.id,
         c.name,
         c.gender,
+        c.nationality_type,
         c.resident_number,
         c.sequence_number,
         c.plan_type,
         c.premium,
         c.has_medical_expense
       FROM companions c
+      INNER JOIN travel_contracts tc
+        ON tc.id = c.contract_id
       WHERE c.contract_id = ?
+        AND tc.member_id = ?
       ORDER BY c.sequence_number ASC`,
-      [contractId]
+      [contractId, memberId]
     );
 
     const insuredPersons = companionsData;
@@ -576,8 +614,8 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
     const [contracts] = await pool.execute<any[]>(
       `SELECT total_premium, insurance_type
        FROM travel_contracts
-       WHERE id = ?`,
-      [contractId]
+       WHERE id = ? AND member_id = ?`,
+      [contractId, memberId]
     );
 
     if (contracts.length === 0) {
@@ -596,6 +634,16 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
       return part.length >= 8 ? part.slice(0, 8) : part.length >= 6 ? part.slice(0, 6) : '';
     };
 
+    /** 외국인등록번호(YYMMDD-XXXXXXX) 7번째 자리로 성별 판별: 5,7=남자, 6,8=여자 */
+    const genderFromForeignResidentNumber = (residentNumber: string | null): string | null => {
+      if (!residentNumber) return null;
+      const afterHyphen = residentNumber.split('-')[1]?.replace(/\D/g, '') ?? '';
+      const seventh = afterHyphen.charAt(0);
+      if (seventh === '5' || seventh === '7') return '남자';
+      if (seventh === '6' || seventh === '8') return '여자';
+      return null;
+    };
+
     // 총 보험료를 Number로 변환
     const totalPremium = contract.total_premium ? Number(contract.total_premium) : 0;
     
@@ -607,11 +655,18 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
         premium = Number(person.premium);
         if (isNaN(premium)) premium = 0;
       }
-      
+
+      // 외국인: resident_number 7번째 자리(5,7=남자, 6,8=여자)로 성별 판별. 내국인: DB gender 사용
+      let gender = person.gender || '남자';
+      if (person.nationality_type === '외국인') {
+        const derived = genderFromForeignResidentNumber(person.resident_number);
+        if (derived) gender = derived;
+      }
+
       return {
         id: person.id,
         name: person.name || '',
-        gender: person.gender || '남자',
+        gender,
         birthDate: formatBirthDate(person.resident_number),
         planType: person.plan_type || '',
         premium: premium,
