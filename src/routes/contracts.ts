@@ -94,6 +94,7 @@ router.get('/api/contracts/list', async (req: Request, res: Response) => {
       WHERE tc.member_id = ? 
         AND tc.created_at >= ? 
         AND tc.created_at <= ?
+        AND tc.status <> '테스트'
       GROUP BY tc.id
       ORDER BY tc.created_at DESC
       LIMIT ${limitValue} OFFSET ${offsetValue}`,
@@ -106,7 +107,8 @@ router.get('/api/contracts/list', async (req: Request, res: Response) => {
       FROM travel_contracts
       WHERE member_id = ? 
         AND created_at >= ? 
-        AND created_at <= ?`,
+        AND created_at <= ?
+        AND status <> '테스트'`,
       [memberId, startDateStr, endDateStr]
     );
 
@@ -232,15 +234,15 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
         LEFT JOIN contractors ct ON tc.id = ct.contract_id
         LEFT JOIN companions c ON tc.id = c.contract_id
         WHERE (
-          -- 비회원 개인 계약
-          (tc.member_id IS NULL 
-           AND ct.contractor_type = '개인'
+          -- 개인: 회원/비회원 공통 (계약자 정보 일치)
+          (ct.contractor_type = '개인'
            AND ct.name = ?
            AND REPLACE(ct.mobile_phone, '-', '') = ?
            AND SUBSTRING(REPLACE(ct.resident_number, '-', ''), 1, 8) = ?)
         )
         AND tc.created_at >= ? 
         AND tc.created_at <= ?
+        AND tc.status <> '테스트'
         GROUP BY tc.id
         ORDER BY tc.created_at DESC
         LIMIT ${limitValue} OFFSET ${offsetValue}
@@ -273,15 +275,15 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
         LEFT JOIN contractors ct ON tc.id = ct.contract_id
         LEFT JOIN companions c ON tc.id = c.contract_id
         WHERE (
-          -- 비회원 법인 계약
-          (tc.member_id IS NULL 
-           AND ct.contractor_type = '법인'
+          -- 법인: 회원/비회원 공통 (계약자 정보 일치)
+          (ct.contractor_type = '법인'
            AND ct.company_name = ?
            AND REPLACE(ct.business_number, '-', '') = ?
            AND (REPLACE(ct.mobile_phone, '-', '') = ? OR REPLACE(ct.phone, '-', '') = ?))
         )
         AND tc.created_at >= ? 
         AND tc.created_at <= ?
+        AND tc.status <> '테스트'
         GROUP BY tc.id
         ORDER BY tc.created_at DESC
         LIMIT ${limitValue} OFFSET ${offsetValue}
@@ -304,13 +306,13 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
         FROM travel_contracts tc
         LEFT JOIN contractors ct ON tc.id = ct.contract_id
         WHERE (
-          tc.member_id IS NULL 
-          AND ct.contractor_type = '개인'
+          ct.contractor_type = '개인'
           AND ct.name = ?
           AND REPLACE(ct.mobile_phone, '-', '') = ?
           AND SUBSTRING(REPLACE(ct.resident_number, '-', ''), 1, 8) = ?)
         AND tc.created_at >= ? 
         AND tc.created_at <= ?
+        AND tc.status <> '테스트'
       `;
       countParams = [name, cleanedPhone, inputBirthDate, startDateStr, endDateStr];
     } else {
@@ -322,13 +324,13 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
         FROM travel_contracts tc
         LEFT JOIN contractors ct ON tc.id = ct.contract_id
         WHERE (
-          tc.member_id IS NULL 
-          AND ct.contractor_type = '법인'
+          ct.contractor_type = '법인'
           AND ct.company_name = ?
           AND REPLACE(ct.business_number, '-', '') = ?
           AND (REPLACE(ct.mobile_phone, '-', '') = ? OR REPLACE(ct.phone, '-', '') = ?))
         AND tc.created_at >= ? 
         AND tc.created_at <= ?
+        AND tc.status <> '테스트'
       `;
       countParams = [company_name, inputBusinessNumber, cleanedPhone, cleanedPhone, startDateStr, endDateStr];
     }
@@ -368,6 +370,236 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
     res.status(500).json({
       success: false,
       message: '계약 목록을 불러오는 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 비회원 계약 상세 조회 (가입내역 조회에서 휴대폰 인증 후 동일 식별 정보로 호출)
+router.get('/api/contracts/non-member/detail/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      birth_date,
+      gender,
+      phone,
+      company_name,
+      business_number,
+    } = req.query;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'contract_id가 필요합니다.',
+      });
+    }
+
+    const contractId = parseInt(id, 10);
+    if (isNaN(contractId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 contract_id입니다.',
+      });
+    }
+
+    const isIndividual = !!name && !!birth_date && !!gender && !!phone;
+    const isCorporate = !!company_name && !!business_number && !!phone;
+
+    if (!isIndividual && !isCorporate) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    let query = '';
+    let params: any[] = [];
+
+    if (isIndividual) {
+      const cleanedPhone = (phone as string).replace(/-/g, '');
+      const inputBirthDate = (birth_date as string).replace(/-/g, '');
+      query = `
+        SELECT 
+          tc.*,
+          CONCAT(
+            DATE_FORMAT(tc.created_at, '%y%m%d'),
+            '-',
+            tc.id
+          ) as contract_number,
+          COALESCE(m.name, ctr.name) as member_name,
+          COALESCE(
+            m.birth_date,
+            SUBSTRING(REPLACE(ctr.resident_number, '-', ''), 1, 6)
+          ) as member_birth_date,
+          COALESCE(m.mobile_phone, ctr.mobile_phone) as member_phone,
+          m.email as member_email,
+          m.email_domain as member_email_domain,
+          ctr.email as contractor_email,
+          (SELECT COUNT(*) FROM companions c WHERE c.contract_id = tc.id) as participants_count,
+          ctr.contractor_type,
+          ctr.company_name,
+          ctr.name as contractor_name,
+          ctr.business_number as contractor_business_number
+        FROM travel_contracts tc
+        LEFT JOIN members m ON tc.member_id = m.id
+        LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
+        WHERE tc.id = ?
+          AND ctr.contractor_type = '개인'
+          AND ctr.name = ?
+          AND REPLACE(ctr.mobile_phone, '-', '') = ?
+          AND SUBSTRING(REPLACE(ctr.resident_number, '-', ''), 1, 8) = ?
+      `;
+      params = [contractId, name, cleanedPhone, inputBirthDate];
+    } else {
+      const cleanedPhone = (phone as string).replace(/-/g, '');
+      const inputBusinessNumber = (business_number as string).replace(/-/g, '');
+      query = `
+        SELECT 
+          tc.*,
+          CONCAT(
+            DATE_FORMAT(tc.created_at, '%y%m%d'),
+            '-',
+            tc.id
+          ) as contract_number,
+          COALESCE(m.name, ctr.name) as member_name,
+          COALESCE(
+            m.birth_date,
+            SUBSTRING(REPLACE(ctr.resident_number, '-', ''), 1, 6)
+          ) as member_birth_date,
+          COALESCE(m.mobile_phone, ctr.mobile_phone) as member_phone,
+          m.email as member_email,
+          m.email_domain as member_email_domain,
+          ctr.email as contractor_email,
+          (SELECT COUNT(*) FROM companions c WHERE c.contract_id = tc.id) as participants_count,
+          ctr.contractor_type,
+          ctr.company_name,
+          ctr.name as contractor_name,
+          ctr.business_number as contractor_business_number
+        FROM travel_contracts tc
+        LEFT JOIN members m ON tc.member_id = m.id
+        LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
+        WHERE tc.id = ?
+          AND ctr.contractor_type = '법인'
+          AND ctr.company_name = ?
+          AND REPLACE(ctr.business_number, '-', '') = ?
+          AND (REPLACE(ctr.mobile_phone, '-', '') = ? OR REPLACE(ctr.phone, '-', '') = ?)
+      `;
+      params = [
+        contractId,
+        company_name,
+        inputBusinessNumber,
+        cleanedPhone,
+        cleanedPhone,
+      ];
+    }
+
+    const [contracts] = await pool.execute<any[]>(query, params);
+
+    if (contracts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const contract = contracts[0];
+
+    let paymentMethod = contract.payment_method || null;
+    let paymentStatus = contract.payment_status || '미결제';
+    let paidAmount: number | null = null;
+    let paymentSubMethod: string | null = null;
+    let paymentDate: string | null = null;
+    let depositorName: string | null = null;
+    let bankName: string | null = null;
+    let accountNumber: string | null = null;
+    let receiptUrl: string | null = null;
+    let useAccidentFreeCash = 0;
+
+    try {
+      const [payments] = await pool.execute<any[]>(
+        `SELECT payment_method, payment_sub_method, status, amount, payment_date, depositor_name, bank_name, account_number, receipt_url
+         FROM payments 
+         WHERE contract_id = ? 
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [contractId]
+      );
+
+      if (payments.length > 0) {
+        paymentMethod = payments[0].payment_method || paymentMethod;
+        paymentSubMethod = payments[0].payment_sub_method || null;
+        paymentStatus = payments[0].status || paymentStatus;
+        paidAmount = payments[0].amount != null ? Number(payments[0].amount) : null;
+        paymentDate = payments[0].payment_date || null;
+        depositorName = payments[0].depositor_name || null;
+        bankName = payments[0].bank_name || null;
+        accountNumber = payments[0].account_number || null;
+        receiptUrl = payments[0].receipt_url || null;
+      }
+
+      const [firstPayments] = await pool.execute<any[]>(
+        `SELECT use_accident_free_cash FROM payments WHERE contract_id = ? ORDER BY id ASC LIMIT 1`,
+        [contractId]
+      );
+      if (firstPayments.length > 0 && firstPayments[0].use_accident_free_cash != null) {
+        useAccidentFreeCash = Math.max(0, Number(firstPayments[0].use_accident_free_cash));
+      }
+    } catch (error) {
+      console.error('결제 정보 조회 오류:', error);
+    }
+
+    const actualInsuredCount = contract.participants_count || contract.travel_participants || 1;
+
+    const formattedContract = {
+      id: contract.id,
+      contractNumber: contract.contract_number || '-',
+      insuranceType: contract.insurance_type || '-',
+      departureDate: toKstDateTimeStringForApi(contract.departure_date),
+      arrivalDate: toKstDateTimeStringForApi(contract.arrival_date),
+      totalPremium: contract.total_premium || 0,
+      status: contract.status || '-',
+      createdAt: contract.created_at,
+      memberName: contract.member_name || '-',
+      memberBirthDate: contract.member_birth_date || '',
+      memberPhone: contract.member_phone || '-',
+      memberEmail: (() => {
+        const email = contract.member_email || '';
+        const domain = contract.member_email_domain || '';
+        if (email && domain) return `${email}@${domain}`;
+        if (email && email.includes('@')) return email;
+        if (email) return email;
+        const ce = contract.contractor_email || '';
+        return ce || '-';
+      })(),
+      travelRegion: contract.travel_region || null,
+      travelCountry: contract.travel_country || null,
+      travelPurpose: contract.travel_purpose || null,
+      travelParticipants: actualInsuredCount,
+      paymentMethod: paymentMethod || '무통장입금',
+      paymentSubMethod,
+      paymentStatus: paymentStatus || '미결제',
+      useAccidentFreeCash,
+      paidAmount: paidAmount != null ? paidAmount : contract.total_premium || 0,
+      paymentDate,
+      depositorName,
+      bankName,
+      accountNumber,
+      receiptUrl,
+      subscriptionCertificateUrl: contract.subscription_certificate_url || null,
+      contractorType: contract.contractor_type || '개인',
+      contractorCompanyName: contract.company_name || null,
+      businessNumber: contract.contractor_business_number || null,
+    };
+
+    res.json({
+      success: true,
+      contract: formattedContract,
+    });
+  } catch (error) {
+    console.error('비회원 계약 상세 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '계약 상세 정보를 불러오는 중 오류가 발생했습니다.',
     });
   }
 });
@@ -545,6 +777,192 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: '계약 상세 정보를 불러오는 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// 비회원 계약 피보험자 정보 조회 (가입신청내역서 출력용)
+router.get('/api/contracts/non-member/:id/participants', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      birth_date,
+      gender,
+      phone,
+      company_name,
+      business_number,
+    } = req.query;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'contract_id가 필요합니다.',
+      });
+    }
+
+    const contractId = parseInt(id, 10);
+    if (isNaN(contractId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 contract_id입니다.',
+      });
+    }
+
+    const isIndividual = !!name && !!birth_date && !!gender && !!phone;
+    const isCorporate = !!company_name && !!business_number && !!phone;
+
+    if (!isIndividual && !isCorporate) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파라미터가 누락되었습니다.',
+      });
+    }
+
+    let authQuery = '';
+    let authParams: any[] = [];
+
+    if (isIndividual) {
+      const cleanedPhone = (phone as string).replace(/-/g, '');
+      const inputBirthDate = (birth_date as string).replace(/-/g, '');
+      authQuery = `
+        SELECT tc.id
+        FROM travel_contracts tc
+        LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
+        WHERE tc.id = ?
+          AND ctr.contractor_type = '개인'
+          AND ctr.name = ?
+          AND REPLACE(ctr.mobile_phone, '-', '') = ?
+          AND SUBSTRING(REPLACE(ctr.resident_number, '-', ''), 1, 8) = ?
+        LIMIT 1
+      `;
+      authParams = [contractId, name, cleanedPhone, inputBirthDate];
+    } else {
+      const cleanedPhone = (phone as string).replace(/-/g, '');
+      const inputBusinessNumber = (business_number as string).replace(/-/g, '');
+      authQuery = `
+        SELECT tc.id
+        FROM travel_contracts tc
+        LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
+        WHERE tc.id = ?
+          AND ctr.contractor_type = '법인'
+          AND ctr.company_name = ?
+          AND REPLACE(ctr.business_number, '-', '') = ?
+          AND (REPLACE(ctr.mobile_phone, '-', '') = ? OR REPLACE(ctr.phone, '-', '') = ?)
+        LIMIT 1
+      `;
+      authParams = [contractId, company_name, inputBusinessNumber, cleanedPhone, cleanedPhone];
+    }
+
+    const [authorized] = await pool.execute<any[]>(authQuery, authParams);
+    if (authorized.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const [companionsData] = await pool.execute<any[]>(
+      `SELECT 
+        c.id,
+        c.name,
+        c.gender,
+        c.nationality_type,
+        c.resident_number,
+        c.sequence_number,
+        c.plan_type,
+        c.premium,
+        c.has_medical_expense
+      FROM companions c
+      WHERE c.contract_id = ?
+      ORDER BY c.sequence_number ASC`,
+      [contractId]
+    );
+
+    const insuredPersons = companionsData;
+
+    const [contracts] = await pool.execute<any[]>(
+      `SELECT total_premium, insurance_type
+       FROM travel_contracts
+       WHERE id = ?`,
+      [contractId]
+    );
+
+    if (contracts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const contract = contracts[0];
+
+    // 회원 GET /api/contracts/:id/participants 와 동일한 포맷 (성별·생년월일·보험료)
+    const formatBirthDate = (residentNumber: string | null) => {
+      if (!residentNumber) return '';
+      const part = residentNumber.split('-')[0]?.replace(/\D/g, '') ?? '';
+      return part.length >= 8 ? part.slice(0, 8) : part.length >= 6 ? part.slice(0, 6) : '';
+    };
+
+    /** 외국인등록번호(YYMMDD-XXXXXXX) 7번째 자리로 성별 판별: 5,7=남자, 6,8=여자 */
+    const genderFromForeignResidentNumber = (residentNumber: string | null): string | null => {
+      if (!residentNumber) return null;
+      const afterHyphen = residentNumber.split('-')[1]?.replace(/\D/g, '') ?? '';
+      const seventh = afterHyphen.charAt(0);
+      if (seventh === '5' || seventh === '7') return '남자';
+      if (seventh === '6' || seventh === '8') return '여자';
+      return null;
+    };
+
+    const totalPremium = contract.total_premium ? Number(contract.total_premium) : 0;
+
+    const participants = insuredPersons.map((person: any, index: number) => {
+      let premium = 0;
+      if (person.premium !== null && person.premium !== undefined) {
+        premium = Number(person.premium);
+        if (isNaN(premium)) premium = 0;
+      }
+
+      let gender = person.gender || '남자';
+      if (person.nationality_type === '외국인') {
+        const derived = genderFromForeignResidentNumber(person.resident_number);
+        if (derived) gender = derived;
+      }
+
+      return {
+        id: person.id,
+        sequence: person.sequence_number || index + 1,
+        name: person.name || '-',
+        gender,
+        nationalityType: person.nationality_type || '-',
+        birthDate: formatBirthDate(person.resident_number),
+        planType: person.plan_type || '-',
+        premium,
+        hasMedicalExpense: Boolean(person.has_medical_expense),
+      };
+    });
+
+    const hasAnyPremium = participants.some((p) => p.premium > 0);
+    if (!hasAnyPremium && totalPremium > 0 && participants.length > 0) {
+      const premiumPerPerson = Math.floor(totalPremium / participants.length);
+      participants.forEach((p) => {
+        p.premium = premiumPerPerson;
+      });
+    }
+
+    res.json({
+      success: true,
+      participants,
+      contractInfo: {
+        totalPremium,
+        insuranceType: contract.insurance_type || '-',
+      },
+    });
+  } catch (error) {
+    console.error('비회원 피보험자 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '피보험자 정보를 불러오는 중 오류가 발생했습니다.',
     });
   }
 });

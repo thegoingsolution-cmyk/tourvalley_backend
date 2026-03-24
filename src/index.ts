@@ -52,7 +52,14 @@ app.use(cors({
   credentials: true,
 }));
 app.use(morgan('combined'));
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      // 외부 연동 charset 이슈 분석/복구를 위해 원문 바이트 보관
+      (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 // API 라우트

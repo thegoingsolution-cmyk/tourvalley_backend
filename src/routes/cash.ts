@@ -33,24 +33,9 @@ router.get('/api/cash/info', async (req: Request, res: Response) => {
       });
     }
 
-    // 무사고캐시 총액 조회 (현재 사용 가능한 캐시)
-    // - 법인/단체 계약(계약자 유형=법인)에서 적립된 충전 내역은 개인 캐시에 포함되면 안 됨
-    // - contract_id는 충전(type='충전')에만 백필/저장되어 있으므로, 충전 내역에 대해서만 계약자 유형을 필터링
+    // 무사고캐시 총액: members.accident_free_cash 기준 (이력 합계와 불일치 시에도 이관·수기 반영 잔액이 맞음)
     const [cashResult] = await pool.execute<any[]>(
-      `SELECT COALESCE(SUM(CASE WHEN afch.type = '충전' THEN afch.amount ELSE -afch.amount END), 0) as total_cash
-      FROM accident_free_cash_history afch
-      WHERE afch.member_id = ?
-        AND (
-          afch.type != '충전'
-          OR afch.contract_id IS NULL
-          OR EXISTS (
-            SELECT 1
-            FROM contractors ct
-            WHERE ct.contract_id = afch.contract_id
-              AND ct.contractor_type = '개인'
-            LIMIT 1
-          )
-        )`,
+      `SELECT COALESCE(accident_free_cash, 0) AS total_cash FROM members WHERE id = ?`,
       [memberId]
     );
 
@@ -58,7 +43,10 @@ router.get('/api/cash/info', async (req: Request, res: Response) => {
     // TODO: 소멸예정일 로직이 추가되면 구현 필요
     const expireCash = 0;
 
-    const totalCash = parseFloat(cashResult[0]?.total_cash || '0');
+    const totalCash =
+      cashResult && cashResult.length > 0
+        ? parseFloat(cashResult[0]?.total_cash || '0')
+        : 0;
 
     res.json({
       success: true,
@@ -301,6 +289,7 @@ router.get('/api/cash/eligible-contracts', async (req: Request, res: Response) =
       AND tc.arrival_date < ?
       AND tc.arrival_date >= ?
       AND tc.payment_status = '결제완료'
+      AND tc.status = '가입완료'
       AND EXISTS (
         SELECT 1
         FROM contractors ct
@@ -427,6 +416,13 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
 
     const contract = contractResult[0];
 
+    if (contract.status !== '가입완료') {
+      return res.status(400).json({
+        success: false,
+        message: '가입완료된 계약만 무사고캐시를 적립할 수 있습니다.',
+      });
+    }
+
     // 단체(법인) 계약은 개인 무사고캐시 적립 대상이 아님
     const [contractorCheck] = await pool.execute<any[]>(
       `SELECT 1
@@ -491,33 +487,18 @@ router.post('/api/cash/accumulate', async (req: Request, res: Response) => {
       });
     }
 
-    // 현재 잔액 조회
-    const [balanceResult] = await pool.execute<any[]>(
-      `SELECT COALESCE(SUM(CASE WHEN afch.type = '충전' THEN afch.amount ELSE -afch.amount END), 0) as balance
-      FROM accident_free_cash_history afch
-      WHERE afch.member_id = ?
-        AND (
-          afch.type != '충전'
-          OR afch.contract_id IS NULL
-          OR EXISTS (
-            SELECT 1
-            FROM contractors ct
-            WHERE ct.contract_id = afch.contract_id
-              AND ct.contractor_type = '개인'
-            LIMIT 1
-          )
-        )`,
-      [memberId]
-    );
-
-    const currentBalance = parseFloat(balanceResult[0]?.balance || '0');
-    const newBalance = currentBalance + cashAmountRounded;
-
-    // 트랜잭션 시작
+    // 트랜잭션 시작 — 잔액은 이력 합계가 아니라 members.accident_free_cash 기준(이관 등으로 이력이 불완전해도 동작)
     const connection = await pool.getConnection();
     await connection.beginTransaction();
 
     try {
+      const [memberCashRows] = await connection.execute<any[]>(
+        `SELECT accident_free_cash FROM members WHERE id = ? FOR UPDATE`,
+        [memberId]
+      );
+      const currentBalance = Number(memberCashRows[0]?.accident_free_cash ?? 0);
+      const newBalance = currentBalance + cashAmountRounded;
+
       // 무사고캐시 이력 추가 (contract_id 저장 → 조회 성능용)
       await connection.execute(
         `INSERT INTO accident_free_cash_history 

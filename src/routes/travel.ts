@@ -1,11 +1,58 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
+import iconv from 'iconv-lite';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 import { sendSms } from '../services/aligoService';
 import { parseDateTimeAsKst } from '../utils/dateTime';
 
 const router = Router();
+type RawBodyRequest = Request & { rawBody?: Buffer };
+
+const getRequestCharset = (contentType?: string): string => {
+  if (!contentType) return 'utf-8';
+  const match = contentType.match(/charset=([^;]+)/i);
+  const raw = (match?.[1] || 'utf-8').trim().toLowerCase();
+  if (raw === 'utf8') return 'utf-8';
+  if (raw === 'euc-kr' || raw === 'cp949' || raw === 'ks_c_5601-1987') return 'cp949';
+  return raw;
+};
+
+const parseRawJsonBody = (req: RawBodyRequest, encoding: iconv.Encoding): any | null => {
+  if (!req.rawBody || req.rawBody.length === 0) return null;
+  try {
+    return JSON.parse(iconv.decode(req.rawBody, encoding));
+  } catch {
+    return null;
+  }
+};
+
+const hasBrokenChars = (value?: string | null): boolean => {
+  if (!value) return false;
+  return value.includes('\uFFFD') || value.includes('�');
+};
+
+const buildBizplayPayloadSummary = (body: any) => ({
+  join_contract_id: body?.join_contract_id ?? null,
+  product_cd: body?.product_cd ?? null,
+  join_access_point: body?.join_access_point ?? null,
+  tour_place: body?.tour_place ?? null,
+  insured_cnt: body?.insured_cnt ?? null,
+  insured_length: Array.isArray(body?.insured) ? body.insured.length : null,
+  has_email: !!body?.email,
+  has_ctel_no: !!body?.ctel_no,
+});
+
+const buildBizplayInsuredSummary = (body: any) => {
+  if (!Array.isArray(body?.insured)) return [];
+  return body.insured.map((item: any) => ({
+    insured_seq: item?.insured_seq ?? null,
+    plan_cd: item?.plan_cd ?? null,
+    premium: item?.premium ?? null,
+    insured_ssn_encrypted: item?.insured_ssn ?? null,
+    insured_name_encrypted: item?.insured_name ?? null,
+  }));
+};
 
 const LONG_TERM_INSURANCE_TYPES = new Set([
   '유학/어학연수',
@@ -241,41 +288,44 @@ const resolveCountryNameFromCode = (code: string): string | null => {
   }
 };
 
-const BIZPLAY_PLAN_MAP: Record<string, Record<string, string>> = {
+const BIZPLAY_PLAN_MAP: Record<string, Record<string, { planType: string; hasMedicalExpense: 0 | 1 }>> = {
   N521029: {
-    BAS: '실속플랜',
-    STD: '표준플랜',
-    CHV: '어린이플랜',
-    OLD: '어르신플랜',
-    DSM: '표준플랜',
-    CHM: '어린이플랜',
-    OLM: '어르신플랜',
-    SP1: '실속플랜',
+    BAS: { planType: '실속플랜', hasMedicalExpense: 1 },
+    STD: { planType: '표준플랜', hasMedicalExpense: 1 },
+    CHV: { planType: '어린이플랜', hasMedicalExpense: 1 },
+    OLD: { planType: '어르신플랜', hasMedicalExpense: 1 },
+    DSM: { planType: '표준플랜', hasMedicalExpense: 0 },
+    CHM: { planType: '어린이플랜', hasMedicalExpense: 0 },
+    OLM: { planType: '어르신플랜', hasMedicalExpense: 0 },
+    SP1: { planType: '실속플랜', hasMedicalExpense: 0 },
   },
   N520046: {
-    BAS: '실속플랜',
-    STD: '표준플랜',
-    HCV: '고급플랜',
-    CHV: '어린이플랜',
-    OLD: '어르신플랜1',
-    OL2: '어르신플랜2',
-    BAM: '실속플랜',
-    STM: '표준플랜',
-    HCM: '고급플랜',
-    CHM: '어린이플랜',
-    OLM: '어르신플랜1',
-    O2M: '어르신플랜2',
+    BAS: { planType: '실속플랜', hasMedicalExpense: 1 },
+    STD: { planType: '표준플랜', hasMedicalExpense: 1 },
+    HCV: { planType: '고급플랜', hasMedicalExpense: 1 },
+    CHV: { planType: '어린이플랜', hasMedicalExpense: 1 },
+    OLD: { planType: '어르신플랜1', hasMedicalExpense: 1 },
+    OL2: { planType: '어르신플랜2', hasMedicalExpense: 1 },
+    BAM: { planType: '실속플랜', hasMedicalExpense: 0 },
+    STM: { planType: '표준플랜', hasMedicalExpense: 0 },
+    HCM: { planType: '고급플랜', hasMedicalExpense: 0 },
+    CHM: { planType: '어린이플랜', hasMedicalExpense: 0 },
+    OLM: { planType: '어르신플랜1', hasMedicalExpense: 0 },
+    O2M: { planType: '어르신플랜2', hasMedicalExpense: 0 },
   },
   N010001: {
-    BAS: '실속플랜',
-    STD: '표준플랜',
-    HCV: '고급플랜',
-    CHV: '어린이플랜',
-    CH2: '어린이플랜',
+    BAS: { planType: '실속플랜', hasMedicalExpense: 1 },
+    STD: { planType: '표준플랜', hasMedicalExpense: 1 },
+    HCV: { planType: '고급플랜', hasMedicalExpense: 1 },
+    CHV: { planType: '어린이플랜', hasMedicalExpense: 1 },
+    CH2: { planType: '어린이플랜2', hasMedicalExpense: 1 },
   },
 };
 
-const resolveBizplayPlanType = (productCode: string, planCode: string): string | null => {
+const resolveBizplayPlanInfo = (
+  productCode: string,
+  planCode: string
+): { planType: string; hasMedicalExpense: 0 | 1 } | null => {
   const product = (productCode || '').trim().toUpperCase();
   const plan = (planCode || '').trim().toUpperCase();
   if (!product || !plan) return null;
@@ -284,11 +334,13 @@ const resolveBizplayPlanType = (productCode: string, planCode: string): string |
 
 const formatBizplayResidentNumber = (value: string): string => {
   const digits = String(value || '').replace(/[^0-9]/g, '');
+  // Bizplay 복호화 주민번호는 보통 9자리(YYYYMMDD + 성별코드1자리) 형태로 들어옴
+  // 저장 포맷: YYYYMMDD-1000000 (뒤 6자리는 0으로 마스킹)
   if (digits.length >= 9) {
-    return `${digits.slice(0, 7)}-${digits.slice(8, 9)}******`;
+    return `${digits.slice(0, 8)}-${digits.slice(8, 9)}000000`;
   }
   if (digits.length >= 8) {
-    return `${digits.slice(0, 7)}-******`;
+    return `${digits.slice(0, 8)}-0000000`;
   }
   return value;
 };
@@ -1122,8 +1174,22 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
 // 계약 등록 (비즈플레이 연동용)
 const handleBizplayRegisterContract = async (req: Request, res: Response) => {
   const connection = await pool.getConnection();
+  const requestId =
+    (typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id']) ||
+    `bizplay-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
   try {
+    const detectedCharset = getRequestCharset(req.headers['content-type']);
+    const rawParsedByDetected = parseRawJsonBody(req as RawBodyRequest, detectedCharset as iconv.Encoding);
+    const rawParsedByCp949 = parseRawJsonBody(req as RawBodyRequest, 'cp949');
+
+    // charset 선언이 잘못되었거나 누락된 경우(cp949) 복구 시도
+    const shouldUseCp949Fallback =
+      hasBrokenChars(req.body?.join_access_point) &&
+      !!rawParsedByCp949?.join_access_point &&
+      !hasBrokenChars(rawParsedByCp949.join_access_point);
+    const body = shouldUseCp949Fallback ? rawParsedByCp949 : (rawParsedByDetected || req.body || {});
+
     const {
       join_contract_id,
       product_cd,
@@ -1137,7 +1203,28 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
       email,
       ctel_no,
       insured,
-    } = req.body || {};
+    } = body || {};
+
+    console.log('[bizplay-register] request received', {
+      requestId,
+      contentType: req.headers['content-type'] || '',
+      detectedCharset,
+      usedCp949Fallback: shouldUseCp949Fallback,
+      bodySummary: buildBizplayPayloadSummary(req.body),
+      parsedBodySummary: buildBizplayPayloadSummary(body),
+      insuredRequestSummary: buildBizplayInsuredSummary(req.body),
+      insuredParsedSummary: buildBizplayInsuredSummary(body),
+    });
+
+    if (hasBrokenChars(req.body?.join_access_point) || hasBrokenChars(join_access_point)) {
+      console.log('[bizplay-register] join_access_point charset diagnostics', {
+        requestId,
+        bodyJoinAccessPoint: req.body?.join_access_point || null,
+        parsedDetectedJoinAccessPoint: rawParsedByDetected?.join_access_point || null,
+        parsedCp949JoinAccessPoint: rawParsedByCp949?.join_access_point || null,
+        finalJoinAccessPoint: join_access_point || null,
+      });
+    }
 
     if (
       !join_contract_id ||
@@ -1204,6 +1291,7 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
       masked_ssn: string;
       plan_cd: string;
       plan_type: string;
+      has_medical_expense: 0 | 1;
       premium: number;
     }> = [];
 
@@ -1224,8 +1312,8 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
         });
       }
 
-      const planType = resolveBizplayPlanType(product_cd, item.plan_cd);
-      if (!planType) {
+      const planInfo = resolveBizplayPlanInfo(product_cd, item.plan_cd);
+      if (!planInfo) {
         return res.json({
           result_cd: '201',
           message: '플랜 코드가 올바르지 않습니다.',
@@ -1240,7 +1328,8 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
           ssn: decryptedSsn,
           masked_ssn: formatBizplayResidentNumber(decryptedSsn),
           plan_cd: item.plan_cd,
-          plan_type: planType,
+          plan_type: planInfo.planType,
+          has_medical_expense: planInfo.hasMedicalExpense,
           premium: premiumValue,
         });
       } catch (error) {
@@ -1252,8 +1341,12 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
     }
 
     const [existingRows] = await connection.execute<any[]>(
-      'SELECT id FROM travel_contracts WHERE contract_number = ? LIMIT 1',
-      [join_contract_id]
+      `SELECT id
+       FROM travel_contracts
+       WHERE bizplay_contract_number = ?
+          OR contract_number = ?
+       LIMIT 1`,
+      [join_contract_id, join_contract_id]
     );
     if (existingRows.length > 0) {
       return res.json({
@@ -1328,13 +1421,14 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
 
     const [contractResult] = await connection.execute<any>(
       `INSERT INTO travel_contracts (
-        member_id, contract_number, insurance_type, departure_date, duration_months, duration_days,
+        member_id, contract_number, bizplay_contract_number, insurance_type, departure_date, duration_months, duration_days,
         arrival_date, travel_region, travel_country, travel_purpose, travel_participants,
         payment_method, payment_status, total_premium, affiliate, device, access_path,
         system_input_status, memo, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         null,
+        join_contract_id,
         join_contract_id,
         insuranceType,
         departureDate,
@@ -1401,7 +1495,7 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
           record.masked_ssn,
           null,
           0,
-          0,
+          record.has_medical_expense,
           record.plan_type,
           record.premium,
           record.sequence,
@@ -1409,7 +1503,26 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
       );
     }
 
+    // 비즈플레이(B2B 포괄) 결제 — 월 단위 정산용 payments 기록
+    await connection.execute(
+      `INSERT INTO payments (
+        contract_id, payment_method, payment_sub_method, amount, status,
+        payment_date, use_accident_free_cash
+      ) VALUES (?, '기타결제', 'b2b포괄결제', ?, '완료', ?, 0)`,
+      [contract_id, totalPremiumValue, new Date()]
+    );
+
     await connection.commit();
+
+    console.log('[bizplay-register] request completed', {
+      requestId,
+      contract_id,
+      join_contract_id,
+      product_cd,
+      join_access_point,
+      insuredCount: insuredRecords.length,
+      totalPremiumValue,
+    });
 
     res.json({
       result_cd: '100',
@@ -1418,7 +1531,12 @@ const handleBizplayRegisterContract = async (req: Request, res: Response) => {
     });
   } catch (error) {
     await connection.rollback();
-    console.error('Bizplay contract registration error:', error);
+    console.error('[bizplay-register] request failed', {
+      requestId,
+      error,
+      contentType: req.headers['content-type'] || '',
+      bodySummary: buildBizplayPayloadSummary(req.body),
+    });
     res.json({
       result_cd: '200',
       message: '계약 등록 중 오류가 발생했습니다.',
@@ -1441,8 +1559,12 @@ const handleBizplayCancelContract = async (req: Request, res: Response) => {
     }
 
     const [rows] = await pool.execute<any[]>(
-      'SELECT id FROM travel_contracts WHERE contract_number = ? LIMIT 1',
-      [join_contract_id]
+      `SELECT id
+       FROM travel_contracts
+       WHERE bizplay_contract_number = ?
+          OR contract_number = ?
+       LIMIT 1`,
+      [join_contract_id, join_contract_id]
     );
 
     if (!rows.length) {
