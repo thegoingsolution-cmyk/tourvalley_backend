@@ -179,6 +179,14 @@ const getFullYearsAge = (birthDate: Date, referenceDate: Date): number => {
 
 const ADULT_PLAN_TYPES = ['실속플랜', '표준플랜', '고보장플랜', '고급플랜'];
 
+/** 국내 단체 보험료: 71세 이상은 premium_rates 가 어르신플랜1(실속)/(표준) 만 사용 (레거시 어르신플랜1·실속/표준 성인명 → 정규화) */
+const resolveDomesticSeniorPlanTypeForGroup = (planType: string): string => {
+  if (planType === '어르신플랜2') return '어르신플랜2';
+  if (planType === '어르신플랜1(실속)' || planType === '어르신플랜1(표준)') return planType;
+  if (planType === '표준플랜') return '어르신플랜1(표준)';
+  return '어르신플랜1(실속)';
+};
+
 // 프론트엔드 URL 추론 헬퍼 함수
 const getFrontendUrl = (): string => {
   // 1. FRONTEND_URL 환경 변수가 있으면 사용
@@ -2812,7 +2820,12 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
           effectivePlanType = '어린이플랜';
         }
       } else if ((age ?? 0) >= 71) {
-        effectivePlanType = plan_type === '어르신플랜2' ? '어르신플랜2' : '어르신플랜1';
+        effectivePlanType =
+          insurance_type === '국내여행보험'
+            ? resolveDomesticSeniorPlanTypeForGroup(plan_type)
+            : plan_type === '어르신플랜2'
+              ? '어르신플랜2'
+              : '어르신플랜1';
       }
       return { effectivePlanType, manNai };
     });

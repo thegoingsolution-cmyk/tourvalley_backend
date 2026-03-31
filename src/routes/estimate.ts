@@ -6,6 +6,51 @@ import { sendAlimTalk } from '../services/aligoService';
 
 const router = Router();
 
+const toDigits = (value: unknown): string => String(value || '').replace(/\D/g, '');
+
+const getBirthDateFromResidentNumber = (residentNumber: unknown): string => {
+  const digits = toDigits(residentNumber);
+  if (digits.length < 7) return '';
+  const yy = digits.substring(0, 2);
+  const mm = digits.substring(2, 4);
+  const dd = digits.substring(4, 6);
+  const genderCode = parseInt(digits.substring(6, 7), 10);
+  const century =
+    genderCode === 3 || genderCode === 4 || genderCode === 7 || genderCode === 8
+      ? '20'
+      : '19';
+  return `${century}${yy}${mm}${dd}`;
+};
+
+const normalizeEstimatePlanTypeForPrint = (
+  insuranceType: string,
+  rawPlanType: unknown,
+  age?: number
+): string => {
+  const raw = String(rawPlanType || '').trim();
+  const p = raw.includes('|') ? raw.split('|')[0].trim() : raw;
+  const a = Number.isFinite(age) ? Number(age) : null;
+
+  const isDomestic = insuranceType.includes('국내');
+  if (!isDomestic) return p || '실속플랜';
+
+  // 국내 기본 플랜 누락 시 나이대 기본값
+  if (!p) {
+    if (a !== null && a >= 91) return '어르신플랜2';
+    if (a !== null && a >= 71) return '어르신플랜1(실속)';
+    return '실속플랜';
+  }
+
+  // 국내 71~90세 레거시 값을 신규 표기로 정규화
+  if (p === '어르신플랜' || p === '어르신플랜1') return '어르신플랜1(실속)';
+  if (a !== null && a >= 71 && a <= 90) {
+    if (p === '실속플랜') return '어르신플랜1(실속)';
+    if (p === '표준플랜') return '어르신플랜1(표준)';
+  }
+  if (a !== null && a >= 91) return '어르신플랜2';
+  return p;
+};
+
 // 견적 신청번호 생성 (YYYYMMDD + 일련번호)
 // connection을 사용하여 트랜잭션 내에서 안전하게 생성
 const generateRequestNumber = async (connection: any): Promise<string> => {
@@ -183,6 +228,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
 
     let totalPremium = 0;
 
+    const submitInsuranceType = getInsuranceType(product_cd);
     for (let i = 0; i < participants.length; i++) {
       const participant = participants[i];
       const sequence = participant.sequence || (i + 1);
@@ -190,6 +236,22 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       const gender = participant.gender === '남자' ? '남자' : '여자';
       const age = calculateAgeFromBirthDate(birthDate);
       const residentNumber = generateResidentNumber(birthDate, gender);
+      const rawPlanType =
+        participant.planType ||
+        participant.plan_type ||
+        participant.plan ||
+        '';
+      const normalizedPlanType = normalizeEstimatePlanTypeForPrint(
+        submitInsuranceType,
+        rawPlanType,
+        age
+      );
+      const rawHasMedicalExpense =
+        participant.has_medical_expense ?? participant.hasMedicalExpense;
+      const hasMedicalExpense =
+        rawHasMedicalExpense === 0 || rawHasMedicalExpense === '0' || rawHasMedicalExpense === false
+          ? 0
+          : 1;
 
       // 3. estimate_companions에 저장 (모든 피보험자)
       // 보험료는 나중에 계산하거나 0으로 설정
@@ -211,8 +273,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
           residentNumber,
           gender,
           0,
-          0,
-          '실속플랜',
+          hasMedicalExpense,
+          normalizedPlanType,
           0,
           sequence,
         ]
@@ -334,19 +396,15 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
     if (companionRows && companionRows.length > 0) {
       // 새 테이블 구조 사용
       for (const companion of companionRows) {
-        // 주민번호에서 생년월일 추출 (앞 6자리: YYMMDD)
-        let birthDate = '';
-        if (companion.resident_number && companion.resident_number.length >= 6) {
-          const yy = companion.resident_number.substring(0, 2);
-          const mm = companion.resident_number.substring(2, 4);
-          const dd = companion.resident_number.substring(4, 6);
-          // 1900년대 또는 2000년대 판단 (간단히 50 이상이면 1900년대)
-          const yearPrefix = parseInt(yy) >= 50 ? '19' : '20';
-          birthDate = `${yearPrefix}${yy}${mm}${dd}`;
-        }
+        // 주민번호 → YYYYMMDD (성별자리 기준 세기 판단)
+        const birthDate = getBirthDateFromResidentNumber(companion.resident_number);
 
         const age = birthDate ? calculateAge(birthDate) : 0;
-        const planType = companion.plan_type || '실속플랜';
+        const planType = normalizeEstimatePlanTypeForPrint(
+          insuranceType,
+          companion.plan_type,
+          age
+        );
         
         // 보험료가 0이면 계산
         let premium = parseFloat(companion.premium) || 0;
@@ -398,7 +456,7 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
       const participantsWithPremium = [];
       for (const participant of participants) {
         const age = calculateAge(participant.birth_date);
-        const planType = '실속플랜';
+        const planType = normalizeEstimatePlanTypeForPrint(insuranceType, participant.planType, age);
         const premium = await calculatePremium(
           insuranceType,
           age,
