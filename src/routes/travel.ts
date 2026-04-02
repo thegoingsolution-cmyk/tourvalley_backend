@@ -1586,7 +1586,8 @@ const handleBizplayCancelContract = async (req: Request, res: Response) => {
     const contractId = rows[0].id;
     await pool.execute(
       `UPDATE travel_contracts
-         SET status = '취소신청',
+         SET status = '취소신청(계약자)',
+             system_input_status = '미입력',
              updated_at = NOW()
        WHERE id = ?`,
       [contractId]
