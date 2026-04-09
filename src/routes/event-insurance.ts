@@ -232,6 +232,11 @@ router.post('/api/event-insurance/estimate', upload.fields([
       memberId = isNaN(parsedId) ? null : parsedId;
     }
 
+    const resolvedAffiliate =
+      (req.body.affiliate && String(req.body.affiliate).trim()) || '투어밸리';
+    const resolvedAccessPath =
+      (req.body.access_path && String(req.body.access_path).trim()) || '견적신청';
+
     console.log('=== 견적 신청 데이터 확인 ===');
     console.log('회원 ID:', memberId);
     console.log('보험시작일시:', req.body.start_date);
@@ -279,9 +284,9 @@ router.post('/api/event-insurance/estimate', upload.fields([
         licenseFile,
         overviewFile,
         memberId, // 로그인한 회원이면 member_id, 아니면 null
-        '투어밸리',
+        resolvedAffiliate,
         req.body.device || 'PC',
-        '견적신청',
+        resolvedAccessPath,
         '등록', // 견적신청 상태
         null, // 시스템 자동 등록
       ]

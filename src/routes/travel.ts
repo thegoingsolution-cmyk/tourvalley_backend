@@ -4,7 +4,7 @@ import iconv from 'iconv-lite';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 import { sendSms } from '../services/aligoService';
-import { parseDateTimeAsKst } from '../utils/dateTime';
+import { getKstCalendarDateNow, parseDateTimeAsKst } from '../utils/dateTime';
 
 const router = Router();
 type RawBodyRequest = Request & { rawBody?: Buffer };
@@ -523,10 +523,10 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       });
     }
 
-    // 보험나이 15세일 때만 만 나이로 성인/어린이 구분
+    // 보험나이 15세일 때만 만 나이로 성인/어린이 구분 (기준일: KST 당일 = 견적·가입 요청 시점)
     let finalPlanType = plan_type;
     if (age === 15 && parsedBirthDate) {
-      const refForManNai = departure;
+      const refForManNai = getKstCalendarDateNow();
       const manNai = getFullYearsAge(parsedBirthDate, refForManNai);
       if (manNai >= 15) {
         // 만 15세 이상 → 성인 플랜(실속/표준/고보장). 다른 성인 플랜 없으면 디폴트 실속플랜
@@ -2519,11 +2519,9 @@ router.post('/api/travel/available-plans', async (req: Request, res: Response) =
 
     console.log('available-plans DB 조회 결과:', { age, plan_types: uniquePlanTypes });
 
-    // 보험나이 15세 + birth_date 있으면 만 나이로 성인/어린이 플랜만 노출
+    // 보험나이 15세 + birth_date 있으면 만 나이로 성인/어린이 플랜만 노출 (기준일: KST 당일)
     if (age === 15 && birth_date) {
-      const refDate = departure_date
-        ? (parseDateTimeAsKst(departure_date) ?? new Date(departure_date))
-        : new Date();
+      const refDate = getKstCalendarDateNow();
       const parsedBirth = parseBirthDate(birth_date);
       if (parsedBirth) {
         const manNai = getFullYearsAge(parsedBirth, refDate);
@@ -2543,10 +2541,10 @@ router.post('/api/travel/available-plans', async (req: Request, res: Response) =
           afterFilter: uniquePlanTypes,
         });
       } else {
-        console.log('보험나이 15세이나 birth_date 파싱 실패 → 만나이 보정 미적용');
+        console.log('보험나이 15세이나 birth_date 파싱 실패 → 만 나이 보정 미적용');
       }
     } else if (age === 15) {
-      console.log('보험나이 15세이나 birth_date 없음 → 만나이 보정 미적용, DB 결과 그대로 반환');
+        console.log('보험나이 15세이나 birth_date 없음 → 만 나이 보정 미적용, DB 결과 그대로 반환');
     }
 
     return res.json({
@@ -2805,8 +2803,9 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
     const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
     const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
 
-    // 1차: 각 피보험자별 만 나이·유효 플랜 계산 (보험나이 15세일 때 성인/어린이 구분)
+    // 1차: 각 피보험자별 만 나이·유효 플랜 계산 (보험나이 15세일 때 성인/어린이 구분, 기준일 KST 당일)
     type EffectivePlan = { effectivePlanType: string; manNai: number | null };
+    const refTodayKst = getKstCalendarDateNow();
     const effectivePlans: EffectivePlan[] = insured_persons.map((insured: { age?: number; plan_type?: string; birth_date?: string }) => {
       const age = insured.age;
       const plan_type = insured.plan_type || '';
@@ -2814,7 +2813,7 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
       let effectivePlanType = plan_type;
       let manNai: number | null = null;
       if (age === 15 && birthDate) {
-        manNai = getFullYearsAge(birthDate, departure);
+        manNai = getFullYearsAge(birthDate, refTodayKst);
         if (manNai >= 15) {
           effectivePlanType = ADULT_PLAN_TYPES.includes(plan_type) ? plan_type : '실속플랜';
         } else {

@@ -781,6 +781,73 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
   }
 });
 
+// 입금확인증 조회 (카드 영수증 본인인증 완료 후 접근하는 경로)
+router.get('/api/contracts/bank-transfer-receipt/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'contract_id가 필요합니다.',
+      });
+    }
+
+    const contractId = parseInt(id, 10);
+    if (isNaN(contractId)) {
+      return res.status(400).json({
+        success: false,
+        message: '유효하지 않은 contract_id입니다.',
+      });
+    }
+
+    const [contracts] = await pool.execute<any[]>(
+      `SELECT id, insurance_type, total_premium
+       FROM travel_contracts
+       WHERE id = ?
+       LIMIT 1`,
+      [contractId]
+    );
+
+    if (contracts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '계약 정보를 찾을 수 없습니다.',
+      });
+    }
+
+    const [payments] = await pool.execute<any[]>(
+      `SELECT amount, payment_date, depositor_name, bank_name, account_number
+       FROM payments
+       WHERE contract_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [contractId]
+    );
+
+    const contract = contracts[0];
+    const payment = payments.length > 0 ? payments[0] : null;
+
+    return res.json({
+      success: true,
+      contract: {
+        insuranceType: contract.insurance_type || '-',
+        totalPremium: contract.total_premium ? Number(contract.total_premium) : 0,
+        paidAmount: payment?.amount != null ? Number(payment.amount) : null,
+        paymentDate: payment?.payment_date || null,
+        depositorName: payment?.depositor_name || null,
+        bankName: payment?.bank_name || null,
+        accountNumber: payment?.account_number || null,
+      },
+    });
+  } catch (error) {
+    console.error('입금확인증 조회 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: '입금확인증 정보를 불러오는 중 오류가 발생했습니다.',
+    });
+  }
+});
+
 // 비회원 계약 피보험자 정보 조회 (가입신청내역서 출력용)
 router.get('/api/contracts/non-member/:id/participants', async (req: Request, res: Response) => {
   try {

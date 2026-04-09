@@ -48,3 +48,17 @@ export function toKstDateTimeStringForApi(value?: Date | string | null): string 
   const s = get('second');
   return `${y}-${m}-${d} ${h}:${min}:${s}`;
 }
+
+/**
+ * 보험나이 15세일 때 성인/어린이(만 나이) 판단용 기준일.
+ * 서버/클라이언트 타임존과 무관하게 KST 달력의 '오늘' 날짜를 나타내는 Date (정오 KST 고정).
+ */
+export function getKstCalendarDateNow(): Date {
+  const s = toKstDateTimeStringForApi(new Date());
+  const y = parseInt(s.slice(0, 4), 10);
+  const m = parseInt(s.slice(5, 7), 10);
+  const d = parseInt(s.slice(8, 10), 10);
+  return new Date(
+    `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T12:00:00+09:00`
+  );
+}

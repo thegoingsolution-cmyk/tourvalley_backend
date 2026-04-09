@@ -91,7 +91,14 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       contractor_phone,
       contractor_email,
       participants,
+      affiliate: bodyAffiliate,
+      access_path: bodyAccessPath,
     } = req.body;
+
+    const resolvedAffiliate =
+      (bodyAffiliate && String(bodyAffiliate).trim()) || '투어밸리';
+    const resolvedAccessPath =
+      (bodyAccessPath && String(bodyAccessPath).trim()) || '투어밸리 사이트';
 
     // 필수 필드 검증
     if (!product_cd || !start_date || !end_date || !tour_num) {
@@ -135,8 +142,10 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
+        affiliate,
+        access_path,
         status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         requestNumber,
         product_cd,
@@ -149,6 +158,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
+        resolvedAffiliate,
+        resolvedAccessPath,
         '견적신청',
       ]
     ) as any[];
