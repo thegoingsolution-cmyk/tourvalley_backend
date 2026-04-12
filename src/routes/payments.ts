@@ -4,6 +4,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import { sendSms } from '../services/aligoService';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
+import { withB2cPgProductPrefix } from '../utils/b2cPgProductName';
 
 const router = Router();
 
@@ -194,13 +195,16 @@ router.post('/api/payments/nicepay/request', async (req: Request, res: Response)
       ? String(orderIdFromBody).trim()
       : `TC${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
 
+    const goodsNameResolved = String(goodsName ?? '').trim() || '국내여행보험';
+    const goodsNameForPg = withB2cPgProductPrefix(goodsNameResolved);
+
     // 결제창 호출을 위한 파라미터 반환
     res.json({
       success: true,
       clientKey,
       orderId,
       amount: amount.toString(),
-      goodsName: goodsName || '국내여행보험',
+      goodsName: goodsNameForPg,
       buyerName,
       buyerEmail,
       buyerTel,
@@ -1209,7 +1213,7 @@ router.post('/api/payments/nicepay/virtual-account', async (req: Request, res: R
       taxFreeAmt: vbankAmount,
       supplyAmt: 0,
       vat: 0,
-      goodsName: '여행보험료',
+      goodsName: withB2cPgProductPrefix('여행보험료'),
       buyerName: buyerName || '',
       buyerEmail: buyerEmail || '',
       buyerTel: buyerTel || '',

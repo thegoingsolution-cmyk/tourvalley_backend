@@ -5,6 +5,7 @@ import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 import { sendSms } from '../services/aligoService';
 import { getKstCalendarDateNow, parseDateTimeAsKst } from '../utils/dateTime';
+import { withB2cPgProductPrefix } from '../utils/b2cPgProductName';
 
 const router = Router();
 type RawBodyRequest = Request & { rawBody?: Buffer };
@@ -448,6 +449,20 @@ const buildKakaoPayReceiptUrl = (approveResponse: any): string | null => {
   const params = new URLSearchParams({ tid });
   if (approveResponse?.cid) params.set('cid', approveResponse.cid);
   return `${base.replace(/\/$/, '')}?${params.toString()}`;
+};
+
+/**
+ * 네이버페이 승인 응답의 merchantPayKey에서 계약 ID 추출.
+ * - 구형: ORDER_{timestamp}_{contractId}
+ * - 신형: contractId만 전달
+ */
+const contractIdFromNaverMerchantPayKey = (merchantPayKey: string | undefined): number | null => {
+  if (merchantPayKey == null || merchantPayKey === '') return null;
+  const s = String(merchantPayKey).trim();
+  const legacy = s.match(/_(\d+)$/);
+  if (legacy) return parseInt(legacy[1], 10);
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  return null;
 };
 
 // 보험료 계산 (국내여행보험용)
@@ -1699,8 +1714,6 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
     const resolvedPurchaserName = (purchaserName && String(purchaserName).trim()) || (customerName && String(customerName).trim()) || undefined;
     const resolvedPurchaserBirthday = purchaserBirthday ? String(purchaserBirthday).replace(/[^0-9]/g, '').slice(0, 8) : undefined;
 
-    console.log('네이버페이 결제 준비:', { contractId, amount, productName, checkOutDate, purchaserName: resolvedPurchaserName, purchaserBirthday: resolvedPurchaserBirthday ? '***' : undefined });
-
     // 필수 필드 검증
     if (!amount || !productName || !checkOutDate) {
       return res.status(400).json({
@@ -1708,6 +1721,10 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
         message: '필수 항목이 누락되었습니다.',
       });
     }
+
+    const productNameForPg = withB2cPgProductPrefix(String(productName).trim());
+
+    console.log('네이버페이 결제 준비:', { contractId, amount, productName: productNameForPg, checkOutDate, purchaserName: resolvedPurchaserName, purchaserBirthday: resolvedPurchaserBirthday ? '***' : undefined });
 
     // 계약 정보 조회
     const [contractRows] = await pool.execute<any[]>(
@@ -1724,8 +1741,8 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
 
     const contract = contractRows[0];
 
-    // orderId 생성
-    const orderId = `ORDER_${Date.now()}_${contractId}`;
+    // orderId: 계약 ID만 사용 (네이버 merchantPayKey와 동일)
+    const orderId = String(contractId);
     const merchantPayKey = orderId;
 
     // useCfmYmdt 설정 (보험 종료일)
@@ -1752,7 +1769,7 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
         order_id, contract_id, amount, product_name, use_cfm_ymdt, status
       ) VALUES (?, ?, ?, ?, ?, 'ready')
       ON DUPLICATE KEY UPDATE amount = ?, product_name = ?, use_cfm_ymdt = ?, status = 'ready'`,
-      [orderId, contractId, amount, productName, useCfmYmdt, amount, productName, useCfmYmdt]
+      [orderId, contractId, amount, productNameForPg, useCfmYmdt, amount, productNameForPg, useCfmYmdt]
     );
 
     res.json({
@@ -1761,7 +1778,7 @@ router.post('/api/travel/contracts/:contractId/create-naver-payment', async (req
         orderId,
         merchantPayKey,
         amount: Math.round(amount),
-        productName,
+        productName: productNameForPg,
         productCount: productCount || 1,
         useCfmYmdt,
         // 보험사 가맹점: 클라이언트 oPay.open() 시 purchaserName / purchaserBirthday 로 전달 권장
@@ -1901,9 +1918,7 @@ router.get('/api/travel/naver-pay-callback', async (req: Request, res: Response)
           return res.redirect(failUrl);
         }
 
-        // orderId에서 contractId 추출
-        const contractIdMatch = merchantPayKey.match(/_(\d+)$/);
-        const contractId = contractIdMatch ? parseInt(contractIdMatch[1]) : null;
+        const contractId = contractIdFromNaverMerchantPayKey(merchantPayKey);
 
         if (!contractId) {
           const frontendUrl = getFrontendUrl();
@@ -2092,6 +2107,8 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
       });
     }
 
+    const itemNameForPg = withB2cPgProductPrefix(String(itemName).trim());
+
     // 계약 정보 조회
     const [contractRows] = await pool.execute<any[]>(
       'SELECT * FROM travel_contracts WHERE id = ?',
@@ -2105,8 +2122,8 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
       });
     }
 
-    // orderId 생성
-    const orderId = `ORDER_${Date.now()}_${contractId}`;
+    // partner_order_id: 계약 ID만 사용
+    const orderId = String(contractId);
 
     // 카카오페이 설정 (신 카카오페이 API)
     const kakaoPayClientId = process.env.KAKAO_PAY_CLIENT_ID;
@@ -2137,7 +2154,7 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
         cid_secret: kakaoPayClientSecret,
         partner_order_id: orderId,
         partner_user_id: String(contractId),
-        item_name: itemName,
+        item_name: itemNameForPg,
         quantity: quantity || 1,
         total_amount: totalAmount,
         tax_free_amount: totalAmount,
@@ -2151,7 +2168,7 @@ router.post('/api/travel/contracts/:contractId/prepare-kakao-payment', async (re
         cid: kakaoPayCid,
         orderId,
         amount: Math.round(amount),
-        itemName,
+        itemName: itemNameForPg,
       });
 
       const response = await fetch(kakaoPayApiUrl, {
