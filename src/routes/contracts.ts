@@ -586,6 +586,7 @@ router.get('/api/contracts/non-member/detail/:id', async (req: Request, res: Res
       accountNumber,
       receiptUrl,
       subscriptionCertificateUrl: contract.subscription_certificate_url || null,
+      englishCertificateUrl: contract.english_certificate_url || null,
       contractorType: contract.contractor_type || '개인',
       contractorCompanyName: contract.company_name || null,
       businessNumber: contract.contractor_business_number || null,
@@ -763,6 +764,7 @@ router.get('/api/contracts/detail/:id', async (req: Request, res: Response) => {
       accountNumber, // 입금계좌번호 (무통장입금)
       receiptUrl, // 영수증 URL
       subscriptionCertificateUrl: contract.subscription_certificate_url || null, // 증권 파일 경로
+      englishCertificateUrl: contract.english_certificate_url || null, // 영문증서 파일 경로
       contractorType: contract.contractor_type || '개인', // 계약자 유형
       contractorCompanyName: contract.company_name || null, // 법인명 (법인인 경우)
       businessNumber: contract.contractor_business_number || null, // 사업자번호 (법인인 경우)
@@ -1214,21 +1216,21 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
       });
     }
 
-    // 개인/법인 타입별 검증
+    // 개인/법인 타입별 검증 (이름/법인명은 선택값)
     if (member_type === 'I') {
-      if (!name || !birth_date) {
+      if (!birth_date) {
         return res.status(400).json({
           success: false,
           code: 'MISSING_PARAMS',
-          message: '이름과 생년월일을 입력해주세요.',
+          message: '생년월일을 입력해주세요.',
         });
       }
     } else if (member_type === 'C') {
-      if (!company_name || !business_number) {
+      if (!business_number) {
         return res.status(400).json({
           success: false,
           code: 'MISSING_PARAMS',
-          message: '법인(단체)명과 사업자번호를 입력해주세요.',
+          message: '사업자번호를 입력해주세요.',
         });
       }
     }
@@ -1266,14 +1268,12 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
         WHERE (
           -- 회원 개인
           (tc.member_id IS NOT NULL 
-           AND m.name = ? 
            AND REPLACE(m.birth_date, '-', '') = ?
            AND REPLACE(m.mobile_phone, '-', '') = ?)
           OR
           -- 비회원 개인
           (tc.member_id IS NULL 
            AND ct.contractor_type = '개인'
-           AND ct.name = ?
            AND REPLACE(ct.mobile_phone, '-', '') = ?
            AND SUBSTRING(REPLACE(ct.resident_number, '-', ''), 1, 8) = ?)
         )
@@ -1283,7 +1283,7 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
         LIMIT 1
       `;
       // resident_number 형식: 198812-11****** → 하이픈 제거 후 앞 8자리 = YYYYMMDD
-      params = [name, inputBirthDate, inputPhone, name, inputPhone, inputBirthDate];
+      params = [inputBirthDate, inputPhone, inputPhone, inputBirthDate];
       if (requested_contract_number) {
         params.push(String(requested_contract_number).trim());
       }
@@ -1299,14 +1299,12 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
         WHERE (
           -- 회원 법인
           (tc.member_id IS NOT NULL
-           AND cm.company_name = ?
            AND REPLACE(cm.business_number, '-', '') = ?
            AND REPLACE(m.mobile_phone, '-', '') = ?)
           OR
           -- 비회원 법인
           (tc.member_id IS NULL
            AND ct.contractor_type = '법인'
-           AND ct.company_name = ?
            AND REPLACE(ct.business_number, '-', '') = ?
            AND REPLACE(ct.mobile_phone, '-', '') = ?)
         )
@@ -1315,7 +1313,7 @@ router.post('/api/certificate/find-contract', async (req: Request, res: Response
         ORDER BY tc.created_at DESC
         LIMIT 1
       `;
-      params = [company_name, inputBusinessNumber, inputPhone, company_name, inputBusinessNumber, inputPhone];
+      params = [inputBusinessNumber, inputPhone, inputBusinessNumber, inputPhone];
       if (requested_contract_number) {
         params.push(String(requested_contract_number).trim());
       }
@@ -1405,21 +1403,21 @@ router.post('/api/certificate/send-code', async (req: Request, res: Response) =>
       });
     }
 
-    // 개인/법인 타입별 검증
+    // 개인/법인 타입별 검증 (이름/법인명은 선택값)
     if (member_type === 'I') {
-      if (!name || !birth_date) {
+      if (!birth_date) {
         return res.status(400).json({
           success: false,
           code: 'MISSING_PARAMS',
-          message: '이름과 생년월일을 입력해주세요.',
+          message: '생년월일을 입력해주세요.',
         });
       }
     } else if (member_type === 'C') {
-      if (!company_name || !business_number) {
+      if (!business_number) {
         return res.status(400).json({
           success: false,
           code: 'MISSING_PARAMS',
-          message: '법인(단체)명과 사업자번호를 입력해주세요.',
+          message: '사업자번호를 입력해주세요.',
         });
       }
     } else {
@@ -1545,7 +1543,8 @@ router.post('/api/certificate/send-code', async (req: Request, res: Response) =>
       console.log('  - 생년월일 일치:', contractBirthDate === inputBirthDate ? '✅' : '❌');
       console.log('============================================');
       
-      if (contractName !== name || contractBirthDate !== inputBirthDate) {
+      const isNameMismatch = !!name && contractName !== name;
+      if (isNameMismatch || contractBirthDate !== inputBirthDate) {
         console.log('❌ [검증 실패] 이름 또는 생년월일 불일치');
         return res.status(400).json({
           success: false,
@@ -1572,8 +1571,8 @@ router.post('/api/certificate/send-code', async (req: Request, res: Response) =>
       
       const inputBusinessNumber = business_number.replace(/-/g, ''); // 하이픈 제거
       
-      if (contractCompanyName !== company_name || 
-          contractBusinessNumber !== inputBusinessNumber) {
+      const isCompanyMismatch = !!company_name && contractCompanyName !== company_name;
+      if (isCompanyMismatch || contractBusinessNumber !== inputBusinessNumber) {
         return res.status(400).json({
           success: false,
           code: 'INFO_MISMATCH',

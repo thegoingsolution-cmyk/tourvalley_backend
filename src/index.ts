@@ -20,6 +20,7 @@ import cashRoutes from './routes/cash';
 import mileageRoutes from './routes/mileage';
 import eventInsuranceRoutes from './routes/event-insurance';
 import estimateRoutes from './routes/estimate';
+import kakaoAddressRoutes from './routes/kakaoAddress';
 
 // 데이터베이스 연결 테스트
 import { testConnection } from './config/database';
@@ -75,6 +76,7 @@ app.use('/', cashRoutes);
 app.use('/', mileageRoutes);
 app.use('/', eventInsuranceRoutes);
 app.use('/', estimateRoutes);
+app.use('/', kakaoAddressRoutes);
 
 // 헬스 체크 라우트
 app.get('/api/health', (req: Request, res: Response) => {

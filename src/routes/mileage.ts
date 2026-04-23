@@ -164,14 +164,14 @@ router.get('/api/mileage/list', async (req: Request, res: Response) => {
   }
 });
 
-// 문화상품권 전환신청
+// 상품권 전환신청
 router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) => {
   const connection = await pool.getConnection();
   
   try {
     await connection.beginTransaction();
 
-    const { gift_type, quantity, total_amount, total_mileage, member_id } = req.body;
+    const { gift_type, quantity, total_amount, total_mileage, member_id, shipping_address, notify_phone } = req.body;
 
     if (!member_id) {
       return res.status(400).json({
@@ -194,6 +194,40 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
         success: false,
         message: '필수 정보가 누락되었습니다.',
       });
+    }
+
+    const giftTypeLabel: { [k: string]: string } = {
+      CC10K_POST: '문화상품권 10,000원권(우편)',
+      SK10K_ALIM: 'SK주유상품권 10,000원권(알림톡)',
+      SB10K_ALIM: '스타벅스상품권 10,000원권(알림톡)',
+      CO10000: '문화상품권 10,000원권(온라인)',
+      CM10000: '문화상품권 10,000원권(모바일)',
+    };
+    if (!giftTypeLabel[String(gift_type)]) {
+      return res.status(400).json({
+        success: false,
+        message: '지원하지 않는 상품권 유형입니다.',
+      });
+    }
+
+    const addrTrim = typeof shipping_address === 'string' ? shipping_address.trim() : '';
+    const phoneClean = String(notify_phone ?? '')
+      .replace(/\D/g, '');
+
+    if (gift_type === 'CC10K_POST') {
+      if (!addrTrim || addrTrim.length < 5) {
+        return res.status(400).json({
+          success: false,
+          message: '우편 수령 주소를 입력해주세요.',
+        });
+      }
+    } else if (gift_type === 'SK10K_ALIM' || gift_type === 'SB10K_ALIM') {
+      if (phoneClean.length < 10 || phoneClean.length > 11) {
+        return res.status(400).json({
+          success: false,
+          message: '받으실 휴대폰 번호를 올바르게 입력해주세요.',
+        });
+      }
     }
 
     if (total_amount < 10000) {
@@ -230,8 +264,9 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
 
     // mileage_transactions에 거래 기록 추가 (먼저 기록)
     // amount는 항상 양수로 저장 (type으로 구분)
-    const descriptionText = `${gift_type === 'CO10000' ? '문화상품권 10,000원권(온라인)' : '문화상품권 10,000원권(모바일)'} ${quantity}매`;
-    const reasonText = '문화상품권 전환';
+    const label = giftTypeLabel[String(gift_type)] || String(gift_type);
+    const descriptionText = `${label} ${quantity}매`;
+    const reasonText = '상품권 전환';
     const reasonDetailText = descriptionText;
 
     const [transactionResult] = await connection.execute<any>(
@@ -265,25 +300,29 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
 
     // mileage_gift_exchanges 테이블에 신청 정보 저장 (배송 정보 관리용)
     // 테이블이 없으면 생성해야 함
+    const shipAddr = gift_type === 'CC10K_POST' ? addrTrim : null;
+    const alimPhone = gift_type === 'SK10K_ALIM' || gift_type === 'SB10K_ALIM' ? phoneClean : null;
+
     await connection.execute(
       `INSERT INTO mileage_gift_exchanges (
         transaction_id, member_id, gift_type, quantity, amount,
+        shipping_address, notify_phone,
         status, created_at
-      ) VALUES (?, ?, ?, ?, ?, '신청', NOW())`,
-      [transactionId, memberId, gift_type, quantity, total_amount]
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, '신청', NOW())`,
+      [transactionId, memberId, gift_type, quantity, total_amount, shipAddr, alimPhone]
     );
 
     await connection.commit();
 
     res.json({
       success: true,
-      message: '문화상품권 전환신청이 완료되었습니다.',
+      message: '상품권 전환신청이 완료되었습니다.',
       transaction_id: transactionId,
       remaining_mileage: newMileage,
     });
   } catch (error) {
     await connection.rollback();
-    console.error('문화상품권 전환신청 오류:', error);
+    console.error('상품권 전환신청 오류:', error);
     res.status(500).json({
       success: false,
       message: '신청 중 오류가 발생했습니다.',
