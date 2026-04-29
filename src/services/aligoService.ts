@@ -1,6 +1,7 @@
 import axios from 'axios';
 import FormData from 'form-data';
 import { URLSearchParams } from 'url';
+import { recordDispatchHistory } from './messageDispatchHistoryService';
 
 // 알리고 API 설정
 const ALIGO_API_URL = 'https://apis.aligo.in';
@@ -111,8 +112,29 @@ export const sendSms = async (params: SendSmsParams): Promise<AligoSendResult> =
       }
     );
 
+    await recordDispatchHistory({
+      channel: 'sms',
+      receiver: receiver.replace(/[^0-9]/g, ''),
+      subject: title || null,
+      messageContent: message,
+      status: String(response.data?.result_code) === '1' ? 'success' : 'failed',
+      providerMessageId: response.data?.msg_id || null,
+      providerResponse: response.data,
+      errorMessage: String(response.data?.result_code) === '1' ? null : response.data?.message || 'SMS 발송 실패',
+      sourceSystem: 'b2c_backend',
+    });
+
     return response.data;
   } catch (error) {
+    await recordDispatchHistory({
+      channel: 'sms',
+      receiver: receiver.replace(/[^0-9]/g, ''),
+      subject: title || null,
+      messageContent: message,
+      status: 'failed',
+      errorMessage: error instanceof Error ? error.message : 'SMS 발송 실패',
+      sourceSystem: 'b2c_backend',
+    });
     throw new Error('SMS 발송에 실패했습니다.');
   }
 };
@@ -217,15 +239,58 @@ export const sendAlimTalk = async (params: SendAlimTalkParams): Promise<AligoAli
     const isSuccess = code === 0 || code === '0' || code === 1 || code === '1';
 
     if (isSuccess) {
+      await recordDispatchHistory({
+        channel: 'alimtalk',
+        receiver: cleanReceiver,
+        subject,
+        messageContent: message,
+        status: 'success',
+        providerMessageId: response.data.info?.mid || response.data.msg_id || null,
+        providerResponse: response.data,
+        templateCode: template_code,
+        sourceSystem: 'b2c_backend',
+      });
       return response.data;
     }
-
+    await recordDispatchHistory({
+      channel: 'alimtalk',
+      receiver: cleanReceiver,
+      subject,
+      messageContent: message,
+      status: 'failed',
+      providerMessageId: response.data.info?.mid || response.data.msg_id || null,
+      providerResponse: response.data,
+      errorMessage: responseMessage || '알림톡 발송 실패',
+      templateCode: template_code,
+      sourceSystem: 'b2c_backend',
+    });
     throw new Error(responseMessage || '알림톡 발송에 실패했습니다.');
   } catch (error: any) {
     if (error.response?.data) {
       const errorMessage = error.response.data.message || '알림톡 발송에 실패했습니다.';
+      await recordDispatchHistory({
+        channel: 'alimtalk',
+        receiver: cleanReceiver,
+        subject,
+        messageContent: message,
+        status: 'failed',
+        providerResponse: error.response?.data,
+        errorMessage,
+        templateCode: template_code,
+        sourceSystem: 'b2c_backend',
+      });
       throw new Error(errorMessage);
     }
+    await recordDispatchHistory({
+      channel: 'alimtalk',
+      receiver: cleanReceiver,
+      subject,
+      messageContent: message,
+      status: 'failed',
+      errorMessage: error.message || '알림톡 발송 실패',
+      templateCode: template_code,
+      sourceSystem: 'b2c_backend',
+    });
     throw new Error(error.message || '알림톡 발송에 실패했습니다.');
   }
 };

@@ -40,6 +40,18 @@ const getInsuranceCompanyName = (insuranceType?: string | null) => {
   return '라이나손해보험';
 };
 
+const resolveAlimtalkTravelDestination = (contract: {
+  insurance_type?: string | null;
+  travel_region?: string | null;
+  travel_country?: string | null;
+}) => {
+  const insuranceType = (contract.insurance_type || '').toLowerCase();
+  if (insuranceType.includes('국내')) {
+    return contract.travel_region || '전국일원';
+  }
+  return contract.travel_country || '';
+};
+
 export const sendContractCompleteAlimTalk = async (
   contractId: number,
   paymentMethod?: string | null,
@@ -90,16 +102,7 @@ export const sendContractCompleteAlimTalk = async (
   const participantSummary =
     companionCount > 1 ? `${representativeName} 외 ${companionCount - 1}명` : representativeName;
 
-  let travelDestination = [contract.travel_region, contract.travel_country]
-    .filter((value: string | null) => !!value)
-    .join(' ');
-
-  if (!travelDestination) {
-    const insuranceType = (contract.insurance_type || '').toLowerCase();
-    if (insuranceType.includes('국내')) {
-      travelDestination = '국내';
-    }
-  }
+  const travelDestination = resolveAlimtalkTravelDestination(contract);
 
   const insurancePeriod = `${formatInsuranceDateTime(contract.departure_date)} ~ ${formatInsuranceDateTime(
     contract.arrival_date

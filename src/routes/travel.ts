@@ -1143,15 +1143,18 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     if (payment?.payment_sub_method === '무통장입금') {
       const receiverPhone = contractor?.mobile_phone || contractor?.phone;
       if (receiverPhone) {
-        const amountToPay = payment.amount || contract.total_premium || 0;
-        const expectedDate = payment.expected_deposit_date;
-        const expectedDateText = expectedDate
-          ? `${expectedDate.substring(0, 4)}년 ${expectedDate.substring(5, 7)}월 ${expectedDate.substring(8, 10)}일`
-          : '가능한 빠른 시일 내';
-        const bankName = payment.bank_name || '';
-        const accountNumber = payment.account_number || '';
-        const accountHolderName = '빨주노초파남보';
-        const message = `[투어밸리] 여행자보험료 입금안내
+        const totalPremium = Number(payment.amount ?? contract.total_premium ?? 0);
+        const useAccidentFreeCash = Math.max(0, Number(payment.use_accident_free_cash) || 0);
+        const amountToPay = Math.max(0, totalPremium - useAccidentFreeCash);
+        if (amountToPay > 0) {
+          const expectedDate = payment.expected_deposit_date;
+          const expectedDateText = expectedDate
+            ? `${expectedDate.substring(0, 4)}년 ${expectedDate.substring(5, 7)}월 ${expectedDate.substring(8, 10)}일`
+            : '가능한 빠른 시일 내';
+          const bankName = payment.bank_name || '';
+          const accountNumber = payment.account_number || '';
+          const accountHolderName = '빨주노초파남보';
+          const message = `[투어밸리] 여행자보험료 입금안내
 
 보험료 무통장입금 안내입니다.
 아래의 보험료 입금 전용계좌로 ${expectedDateText}까지
@@ -1164,14 +1167,15 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
 
 보험료 입금확인 후 보험가입이 완료됩니다.`;
 
-        try {
-          await sendSms({
-            receiver: receiverPhone,
-            message,
-            title: '[투어밸리] 무통장입금 안내',
-          });
-        } catch (smsError) {
-          console.error('무통장입금 안내 LMS 발송 실패:', smsError);
+          try {
+            await sendSms({
+              receiver: receiverPhone,
+              message,
+              title: '[투어밸리] 무통장입금 안내',
+            });
+          } catch (smsError) {
+            console.error('무통장입금 안내 LMS 발송 실패:', smsError);
+          }
         }
       }
     }
