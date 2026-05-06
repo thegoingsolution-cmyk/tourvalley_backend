@@ -862,6 +862,9 @@ function generateContractNumber(): string {
   return `TC${year}${month}${day}${random}`;
 }
 
+/** 카드/PG 선택 후 실제 카드 금액이 0원인 경우(전액 무사고캐시 등): PG 결제창 호출 불가 → 등록 API에서 즉시 완료 처리 */
+const PG_INSTANT_COMPLETE_METHODS = ['나이스페이먼츠', '네이버페이', '카카오페이'] as const;
+
 // 계약 등록 (B2C/제휴사 공용)
 router.post('/api/travel/register-contract', async (req: Request, res: Response) => {
   if (req.body?.join_contract_id) {
@@ -874,6 +877,36 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     await connection.beginTransaction();
 
     const { contract, contractor, insured_persons, companions, payment } = req.body;
+
+    const pgMethodForZeroCheck =
+      typeof payment?.payment_method === 'string' ? payment.payment_method.trim() : '';
+    const payAmountEarly = Number(payment?.amount) || 0;
+    const totalPremiumEarly = Number(contract?.total_premium) || 0;
+    const useCashEarly = Math.max(0, Number(payment?.use_accident_free_cash) || 0);
+    if (
+      payment?.status === '완료' &&
+      payAmountEarly === 0 &&
+      totalPremiumEarly > 0 &&
+      PG_INSTANT_COMPLETE_METHODS.includes(pgMethodForZeroCheck as any)
+    ) {
+      if (useCashEarly !== totalPremiumEarly) {
+        await connection.rollback();
+        res.status(400).json({
+          success: false,
+          message:
+            '무사고캐시 등으로 카드 결제 금액이 없을 때는 사용 무사고캐시가 합계 보험료와 같아야 합니다.',
+        });
+        return;
+      }
+      if (!contract?.member_id) {
+        await connection.rollback();
+        res.status(400).json({
+          success: false,
+          message: '무사고캐시 전액 결제는 로그인한 회원만 이용할 수 있습니다.',
+        });
+        return;
+      }
+    }
 
     let resolvedTravelRegion: string | null = contract?.travel_region || null;
     if (resolvedTravelRegion === '해외') {
@@ -1087,6 +1120,14 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
       // 나이스페이/네이버페이/카카오페이 등 PG 결제는 payment_sub_method가 null → payment_details 미저장(정상)
     }
 
+    // PG 즉시 완료 포함, 결제완료로 등록된 계약은 콜백 없이 가입완료 상태로 맞춤
+    if (payment?.status === '완료') {
+      await connection.execute(
+        `UPDATE travel_contracts SET status = '가입완료', updated_at = NOW() WHERE id = ?`,
+        [contract_id]
+      );
+    }
+
     // 5. 마일리지 적립 (결제 완료인 경우)
     if (payment?.status === '완료' && contract.member_id) {
       const paymentAmount = payment.amount || contract.total_premium || 0;
@@ -1139,6 +1180,21 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     }
 
     await connection.commit();
+
+    if (
+      payment?.status === '완료' &&
+      payAmountEarly === 0 &&
+      totalPremiumEarly > 0 &&
+      useCashEarly === totalPremiumEarly &&
+      !!contract?.member_id &&
+      PG_INSTANT_COMPLETE_METHODS.includes(pgMethodForZeroCheck as any)
+    ) {
+      try {
+        await sendContractCompleteAlimTalk(contract_id, payment.payment_method, payment.payment_sub_method ?? null);
+      } catch (alimtalkError) {
+        console.error('가입완료 알림톡 발송 실패(전액 무사고캐시·PG 선택):', alimtalkError);
+      }
+    }
 
     if (payment?.payment_sub_method === '무통장입금') {
       const receiverPhone = contractor?.mobile_phone || contractor?.phone;
