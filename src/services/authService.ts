@@ -11,6 +11,61 @@ const hashPassword = (password: string): string => {
 
 const normalizePhone = (phone: string): string => phone.replace(/[^0-9]/g, '');
 
+/** UI placeholder / legacy values that must not be appended as a domain */
+const INVALID_SIGNUP_EMAIL_DOMAIN = new Set([
+  '',
+  '선택',
+  '직접입력',
+  '__custom__',
+]);
+
+type NormalizedMemberSignupEmail = {
+  localEmail: string;
+  emailDomain: string | null;
+  fullEmail: string | null;
+};
+
+const normalizeMemberSignupEmail = (contact: {
+  email?: string;
+  emailDomain?: string;
+}): NormalizedMemberSignupEmail => {
+  let local = (contact.email ?? '').trim();
+  let domain = (contact.emailDomain ?? '').trim();
+
+  if (INVALID_SIGNUP_EMAIL_DOMAIN.has(domain)) {
+    domain = '';
+  }
+
+  if (local.includes('@')) {
+    const [first, ...rest] = local.split('@');
+    local = first.trim();
+    const parsedDomain = rest.join('@').trim();
+    if (parsedDomain) {
+      domain = parsedDomain;
+    }
+  }
+
+  const domainOrNull = domain || null;
+
+  if (!local && !domainOrNull) {
+    return { localEmail: '', emailDomain: null, fullEmail: null };
+  }
+
+  if (local && domainOrNull) {
+    return {
+      localEmail: local,
+      emailDomain: domainOrNull,
+      fullEmail: `${local}@${domainOrNull}`,
+    };
+  }
+
+  return {
+    localEmail: local,
+    emailDomain: domainOrNull,
+    fullEmail: local || null,
+  };
+};
+
 const mapMemberType = (memberType: string): '개인' | '법인' => {
   if (memberType === 'C' || memberType === '법인') {
     return '법인';
@@ -390,6 +445,11 @@ export const registerPersonalMember = async (data: PersonalMemberData): Promise<
     // 성별 변환
     const genderValue = data.gender === 'male' ? '남자' : data.gender === 'female' ? '여자' : null;
 
+    const emailNorm = normalizeMemberSignupEmail({
+      email: data.email,
+      emailDomain: data.emailDomain,
+    });
+
     // 회원 등록
     const [result] = await connection.execute<ResultSetHeader>(
       `INSERT INTO members (
@@ -407,8 +467,8 @@ export const registerPersonalMember = async (data: PersonalMemberData): Promise<
         data.name,
         data.birthDate || null,
         genderValue,
-        data.email,
-        data.emailDomain || null,
+        emailNorm.localEmail,
+        emailNorm.emailDomain,
         data.phone,
         data.termsAgreed ? 1 : 0,
         data.privacyAgreed ? 1 : 0,
@@ -525,6 +585,7 @@ export const registerCorporateMember = async (data: CorporateMemberData): Promis
 
     // 대표 담당자 정보
     const primaryContact = data.contacts[0];
+    const primaryEmailNorm = normalizeMemberSignupEmail(primaryContact);
 
     // 회원 등록
     const [memberResult] = await connection.execute<ResultSetHeader>(
@@ -541,8 +602,8 @@ export const registerCorporateMember = async (data: CorporateMemberData): Promis
         data.username,
         hashedPassword,
         primaryContact.name,
-        primaryContact.email || '',
-        primaryContact.emailDomain || null,
+        primaryEmailNorm.localEmail,
+        primaryEmailNorm.emailDomain,
         data.primaryPhone,
         data.termsAgreed ? 1 : 0,
         data.privacyAgreed ? 1 : 0,
@@ -573,9 +634,7 @@ export const registerCorporateMember = async (data: CorporateMemberData): Promis
     // 담당자 정보 등록
     for (let i = 0; i < data.contacts.length; i++) {
       const contact = data.contacts[i];
-      const fullEmail = contact.email && contact.emailDomain 
-        ? `${contact.email}@${contact.emailDomain}` 
-        : contact.email || null;
+      const { fullEmail } = normalizeMemberSignupEmail(contact);
 
       await connection.execute(
         `INSERT INTO corporate_contacts (
@@ -957,9 +1016,7 @@ export const updateCorporateMember = async (
     // 담당자 정보 업데이트
     if (data.contacts && data.contacts.length > 0) {
       for (const contact of data.contacts) {
-        const fullEmail = contact.email && contact.emailDomain 
-          ? `${contact.email}@${contact.emailDomain}` 
-          : contact.email || null;
+        const { fullEmail } = normalizeMemberSignupEmail(contact);
 
         if (contact.id) {
           // 기존 담당자 업데이트
@@ -996,9 +1053,10 @@ export const updateCorporateMember = async (
 
       // 대표 담당자 정보로 members 테이블 업데이트
       const primaryContact = data.contacts[0];
-      const primaryEmail = primaryContact.email && primaryContact.emailDomain 
-        ? `${primaryContact.email}@${primaryContact.emailDomain}` 
-        : primaryContact.email || null;
+      const primaryNorm = normalizeMemberSignupEmail({
+        email: primaryContact.email,
+        emailDomain: primaryContact.emailDomain,
+      });
 
       await connection.execute(
         `UPDATE members 
@@ -1006,8 +1064,8 @@ export const updateCorporateMember = async (
          WHERE id = ?`,
         [
           primaryContact.contact_name,
-          primaryContact.email || null,
-          primaryContact.emailDomain || null,
+          primaryNorm.localEmail || null,
+          primaryNorm.emailDomain,
           primaryContact.mobile_phone || null,
           memberId,
         ]

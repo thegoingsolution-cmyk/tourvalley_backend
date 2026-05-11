@@ -50,6 +50,32 @@ export function toKstDateTimeStringForApi(value?: Date | string | null): string 
 }
 
 /**
+ * 출발 시각(KST 달력)에 달력 개월수를 더한 시각.
+ * 프론트 `addInsuranceCalendarMonthsToPickedInstant`와 동일 규칙(말일 클램프, KST 고정).
+ */
+export function addInsuranceCalendarMonthsFromKstInstant(departure: Date, monthsToAdd: number): Date | null {
+  const s = toKstDateTimeStringForApi(departure);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const y0 = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const day = parseInt(m[3], 10);
+  const hh = parseInt(m[4], 10);
+  const mi = parseInt(m[5], 10);
+  const ss = parseInt(m[6], 10);
+  if ([y0, mo, day, hh, mi, ss].some((n) => Number.isNaN(n))) return null;
+
+  const totalMonths = y0 * 12 + (mo - 1) + monthsToAdd;
+  const y1 = Math.floor(totalMonths / 12);
+  const m1 = (totalMonths % 12) + 1;
+  const lastDayInTargetMonth = new Date(y1, m1, 0).getDate();
+  const dayClamped = Math.min(day, lastDayInTargetMonth);
+
+  const out = `${y1}-${String(m1).padStart(2, '0')}-${String(dayClamped).padStart(2, '0')} ${String(hh).padStart(2, '0')}:${String(mi).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  return parseDateTimeAsKst(out);
+}
+
+/**
  * 보험나이 15세일 때 성인/어린이(만 나이) 판단용 기준일.
  * 서버/클라이언트 타임존과 무관하게 KST 달력의 '오늘' 날짜를 나타내는 Date (정오 KST 고정).
  */

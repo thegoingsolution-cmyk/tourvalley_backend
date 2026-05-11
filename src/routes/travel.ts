@@ -4,7 +4,12 @@ import iconv from 'iconv-lite';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
 import { sendSms } from '../services/aligoService';
-import { getKstCalendarDateNow, parseDateTimeAsKst } from '../utils/dateTime';
+import {
+  addInsuranceCalendarMonthsFromKstInstant,
+  getKstCalendarDateNow,
+  parseDateTimeAsKst,
+  toKstDateTimeStringForApi,
+} from '../utils/dateTime';
 import { withB2cPgProductPrefix } from '../utils/b2cPgProductName';
 
 const router = Router();
@@ -114,6 +119,47 @@ const getRateLookupCriteria = (
   }
 
   return { unit: 'days', value: periodDays };
+};
+
+/** 해외여행 단기요율 테이블 최대 일수 구간(3개월=40% 행). 달력 3개월 허용기간은 90일 초과 ceil일 수 있음 */
+const OVERSEAS_TRAVEL_MAX_SHORT_TERM_DAY_TIER = 90;
+
+const kstYmd = (d: Date): string => toKstDateTimeStringForApi(d).slice(0, 10);
+
+const resolveOverseasShortTripRateLookupPeriodDays = (
+  insuranceType: string,
+  departure: Date,
+  arrival: Date,
+  periodDays: number
+): number => {
+  if (insuranceType !== '해외여행보험') {
+    return periodDays;
+  }
+
+  /** 달력 1·2·3개월 경계일(KST)에 도착이 속하면 요율표 30·60·90일 행(20·30·40%). 그 외는 일 단위 ceil 유지 */
+  const b1 = addInsuranceCalendarMonthsFromKstInstant(departure, 1);
+  const b2 = addInsuranceCalendarMonthsFromKstInstant(departure, 2);
+  const b3 = addInsuranceCalendarMonthsFromKstInstant(departure, 3);
+  if (b1 && b2 && b3 && ![b1, b2, b3].some((b) => Number.isNaN(b.getTime()))) {
+    const arr = arrival.getTime();
+    const d1 = kstYmd(b1);
+    const d2 = kstYmd(b2);
+    const d3 = kstYmd(b3);
+    const arrDay = kstYmd(arrival);
+    if (arr <= b1.getTime() && arrDay === d1) return 30;
+    if (arr > b1.getTime() && arr <= b2.getTime() && arrDay === d2) return 60;
+    if (arr > b2.getTime() && arr <= b3.getTime() && arrDay === d3) return 90;
+  }
+
+  if (periodDays <= OVERSEAS_TRAVEL_MAX_SHORT_TERM_DAY_TIER) {
+    return periodDays;
+  }
+  const maxArrival = addInsuranceCalendarMonthsFromKstInstant(departure, 3);
+  if (!maxArrival || Number.isNaN(maxArrival.getTime())) return periodDays;
+  if (arrival.getTime() <= maxArrival.getTime()) {
+    return OVERSEAS_TRAVEL_MAX_SHORT_TERM_DAY_TIER;
+  }
+  return periodDays;
 };
 
 const parseBirthDate = (birthDateStr?: string): Date | null => {
@@ -522,13 +568,20 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
     const arrival = parseDateTimeAsKst(arrival_date) ?? new Date(arrival_date);
     const diffTime = arrival.getTime() - departure.getTime();
     const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
-    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
+    const rateLookupPeriodDays = resolveOverseasShortTripRateLookupPeriodDays(
+      insurance_type,
+      departure,
+      arrival,
+      periodDays
+    );
+    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, rateLookupPeriodDays);
 
     console.log('기간 계산:', {
       departure: departure.toISOString(),
       arrival: arrival.toISOString(),
       diffTime_ms: diffTime,
-      periodDays
+      periodDays,
+      rateLookupPeriodDays,
     });
 
     if (periodDays <= 0) {
@@ -2878,7 +2931,13 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
     }
     const diffTime = arrival.getTime() - departure.getTime();
     const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
-    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, periodDays);
+    const rateLookupPeriodDays = resolveOverseasShortTripRateLookupPeriodDays(
+      insurance_type,
+      departure,
+      arrival,
+      periodDays
+    );
+    const rateLookup = getRateLookupCriteria(insurance_type, departure, arrival, rateLookupPeriodDays);
 
     // 1차: 각 피보험자별 만 나이·유효 플랜 계산 (보험나이 15세일 때 성인/어린이 구분, 기준일 KST 당일)
     type EffectivePlan = { effectivePlanType: string; manNai: number | null };
