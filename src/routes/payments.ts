@@ -687,31 +687,7 @@ router.post('/api/payments/nicepay/approve', async (req: Request, res: Response)
         );
         const contract = contractRows[0];
 
-        // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
-        const mileageAmount = Math.min(Math.floor(parseInt(amount) * 0.03), 30000);
-        
-        if (mileageAmount > 0 && contract?.member_id) {
-          // members 테이블의 mileage 업데이트
-          await connection.execute(
-            `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
-            [mileageAmount, contract.member_id]
-          );
-
-          // 업데이트 후 잔액 조회
-          const [memberResult] = await connection.execute<any[]>(
-            `SELECT mileage FROM members WHERE id = ?`,
-            [contract.member_id]
-          );
-          const newBalance = memberResult[0]?.mileage || 0;
-
-          // mileage_transactions 테이블에 저장
-          await connection.execute(
-            `INSERT INTO mileage_transactions (
-              member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
-            ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
-            [contract.member_id, mileageAmount, contract_id, newBalance]
-          );
-        }
+        // 여행 계약 마일리지는 보험종료일+3일 경과 후 배치에서 적립 (scripts/accrueDeferredTravelMileage.ts)
 
         // 무사고캐시 사용분 차감 (위에서 조회한 useAccidentFreeCash 사용)
         if (useAccidentFreeCash > 0 && contract?.member_id) {
@@ -1441,28 +1417,7 @@ router.post('/api/payments/nicepay/virtual-account/notify', async (req: Request,
       );
       const contract = contractRows[0];
 
-      // 마일리지 지급 (결제 금액의 3%, 최대 30,000P)
-      const mileageAmount = Math.min(Math.floor(parseInt(amount) * 0.03), 30000);
-      
-      if (mileageAmount > 0 && contract?.member_id) {
-        await connection.execute(
-          `UPDATE members SET mileage = mileage + ? WHERE id = ?`,
-          [mileageAmount, contract.member_id]
-        );
-
-        const [memberResult] = await connection.execute<any[]>(
-          `SELECT mileage FROM members WHERE id = ?`,
-          [contract.member_id]
-        );
-        const newBalance = memberResult[0]?.mileage || 0;
-
-        await connection.execute(
-          `INSERT INTO mileage_transactions (
-            member_id, type, amount, description, reason, reason_detail, reference_type, reference_id, balance
-          ) VALUES (?, 'earn', ?, '여행보험 가입 마일리지', '여행보험 가입 마일리지', '보험료의 3% 적립 (최대 30,000P)', 'contract', ?, ?)`,
-          [contract.member_id, mileageAmount, payment.contract_id, newBalance]
-        );
-      }
+      // 여행 계약 마일리지는 보험종료일+3일 경과 후 배치에서 적립 (scripts/accrueDeferredTravelMileage.ts)
 
       // 무사고캐시 사용분 차감 (가상계좌 입금 완료 시) - register-contract 시 저장한 값은 계약의 첫 번째 대기 결제 행에 있음
       const [pendingPaymentRows] = await connection.execute<any[]>(
