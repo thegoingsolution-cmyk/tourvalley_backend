@@ -88,7 +88,14 @@ router.get('/api/contracts/list', async (req: Request, res: Response) => {
         tc.travel_region,
         tc.travel_country,
         tc.travel_purpose,
-        GROUP_CONCAT(DISTINCT c.plan_type) as plan_types
+        GROUP_CONCAT(DISTINCT c.plan_type) as plan_types,
+        (
+          SELECT c_rep.name
+          FROM companions c_rep
+          WHERE c_rep.contract_id = tc.id
+          ORDER BY c_rep.sequence_number ASC
+          LIMIT 1
+        ) as representative_insured_name
       FROM travel_contracts tc
       LEFT JOIN companions c ON tc.id = c.contract_id
       WHERE tc.member_id = ? 
@@ -129,6 +136,7 @@ router.get('/api/contracts/list', async (req: Request, res: Response) => {
       travelRegion: contract.travel_region || null,
       travelCountry: contract.travel_country || null,
       travelPurpose: contract.travel_purpose || null,
+      representativeInsuredName: contract.representative_insured_name || null,
     }));
 
     res.json({
@@ -229,7 +237,14 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
           tc.travel_region,
           tc.travel_country,
           tc.travel_purpose,
-          GROUP_CONCAT(DISTINCT c.plan_type) as plan_types
+          GROUP_CONCAT(DISTINCT c.plan_type) as plan_types,
+          (
+            SELECT c_rep.name
+            FROM companions c_rep
+            WHERE c_rep.contract_id = tc.id
+            ORDER BY c_rep.sequence_number ASC
+            LIMIT 1
+          ) as representative_insured_name
         FROM travel_contracts tc
         LEFT JOIN contractors ct ON tc.id = ct.contract_id
         LEFT JOIN companions c ON tc.id = c.contract_id
@@ -270,7 +285,14 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
           tc.travel_region,
           tc.travel_country,
           tc.travel_purpose,
-          GROUP_CONCAT(DISTINCT c.plan_type) as plan_types
+          GROUP_CONCAT(DISTINCT c.plan_type) as plan_types,
+          (
+            SELECT c_rep.name
+            FROM companions c_rep
+            WHERE c_rep.contract_id = tc.id
+            ORDER BY c_rep.sequence_number ASC
+            LIMIT 1
+          ) as representative_insured_name
         FROM travel_contracts tc
         LEFT JOIN contractors ct ON tc.id = ct.contract_id
         LEFT JOIN companions c ON tc.id = c.contract_id
@@ -353,6 +375,7 @@ router.get('/api/contracts/non-member/list', async (req: Request, res: Response)
       travelRegion: contract.travel_region || null,
       travelCountry: contract.travel_country || null,
       travelPurpose: contract.travel_purpose || null,
+      representativeInsuredName: contract.representative_insured_name || null,
     }));
 
     res.json({
