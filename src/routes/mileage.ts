@@ -198,6 +198,7 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
 
     const giftTypeLabel: { [k: string]: string } = {
       CC10K_POST: '문화상품권 10,000원권(우편)',
+      BM10K_ALIM: '배달의민족 10,000원권(알림톡)',
       SK10K_ALIM: 'SK주유상품권 10,000원권(알림톡)',
       SB10K_ALIM: '스타벅스상품권 10,000원권(알림톡)',
       CO10000: '문화상품권 10,000원권(온라인)',
@@ -221,7 +222,7 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
           message: '우편 수령 주소를 입력해주세요.',
         });
       }
-    } else if (gift_type === 'SK10K_ALIM' || gift_type === 'SB10K_ALIM') {
+    } else if (gift_type === 'BM10K_ALIM' || gift_type === 'SK10K_ALIM' || gift_type === 'SB10K_ALIM') {
       if (phoneClean.length < 10 || phoneClean.length > 11) {
         return res.status(400).json({
           success: false,
@@ -301,7 +302,10 @@ router.post('/api/mileage/exchange-gift', async (req: Request, res: Response) =>
     // mileage_gift_exchanges 테이블에 신청 정보 저장 (배송 정보 관리용)
     // 테이블이 없으면 생성해야 함
     const shipAddr = gift_type === 'CC10K_POST' ? addrTrim : null;
-    const alimPhone = gift_type === 'SK10K_ALIM' || gift_type === 'SB10K_ALIM' ? phoneClean : null;
+    const alimPhone =
+      gift_type === 'BM10K_ALIM' || gift_type === 'SK10K_ALIM' || gift_type === 'SB10K_ALIM'
+        ? phoneClean
+        : null;
 
     await connection.execute(
       `INSERT INTO mileage_gift_exchanges (
