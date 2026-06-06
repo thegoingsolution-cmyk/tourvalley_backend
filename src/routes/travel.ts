@@ -3,6 +3,10 @@ import crypto from 'crypto';
 import iconv from 'iconv-lite';
 import pool from '../config/database';
 import { sendContractCompleteAlimTalk } from '../services/contractAlimtalkService';
+import {
+  getDomesticSeniorAgeThreshold,
+  isDomesticMedicalExpenseOn,
+} from '../constants/domesticAgeBrackets';
 import { sendSms } from '../services/aligoService';
 import {
   addInsuranceCalendarMonthsFromKstInstant,
@@ -226,10 +230,14 @@ const getFullYearsAge = (birthDate: Date, referenceDate: Date): number => {
 
 const ADULT_PLAN_TYPES = ['실속플랜', '표준플랜', '고보장플랜', '고급플랜'];
 
-/** 국내 단체 보험료: 71세 이상은 premium_rates 가 어르신플랜1(실속)/(표준) 만 사용 (레거시 어르신플랜1·실속/표준 성인명 → 정규화) */
-const resolveDomesticSeniorPlanTypeForGroup = (planType: string): string => {
-  if (planType === '어르신플랜2') return '어르신플랜2';
+/** 국내 단체 보험료: 어르신 구간은 premium_rates 의 어르신플랜1(실속)/(표준) 사용 (실손 80+, 비실손 71+) */
+const resolveDomesticSeniorPlanTypeForGroup = (planType: string, hasMedicalExpense?: unknown): string => {
+  const silsok = isDomesticMedicalExpenseOn(hasMedicalExpense);
+  if (planType === '어르신플랜2') {
+    return silsok ? '어르신플랜1(실속)' : '어르신플랜2';
+  }
   if (planType === '어르신플랜1(실속)' || planType === '어르신플랜1(표준)') return planType;
+  if (planType === '어르신플랜' || planType === '어르신플랜1') return '어르신플랜1(실속)';
   if (planType === '표준플랜') return '어르신플랜1(표준)';
   return '어르신플랜1(실속)';
 };
@@ -2867,10 +2875,11 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
     // 1차: 각 피보험자별 만 나이·유효 플랜 계산 (보험나이 15세일 때 성인/어린이 구분, 기준일 KST 당일)
     type EffectivePlan = { effectivePlanType: string; manNai: number | null };
     const refTodayKst = getKstCalendarDateNow();
-    const effectivePlans: EffectivePlan[] = insured_persons.map((insured: { age?: number; plan_type?: string; birth_date?: string }) => {
+    const effectivePlans: EffectivePlan[] = insured_persons.map((insured: { age?: number; plan_type?: string; birth_date?: string; has_medical_expense?: unknown }) => {
       const age = insured.age;
       const plan_type = insured.plan_type || '';
       const birthDate = parseBirthDate(insured.birth_date);
+      const seniorThreshold = getDomesticSeniorAgeThreshold(insured.has_medical_expense);
       let effectivePlanType = plan_type;
       let manNai: number | null = null;
       if (age === 15 && birthDate) {
@@ -2880,10 +2889,10 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
         } else {
           effectivePlanType = '어린이플랜';
         }
-      } else if ((age ?? 0) >= 71) {
+      } else if ((age ?? 0) >= seniorThreshold) {
         effectivePlanType =
           insurance_type === '국내여행보험'
-            ? resolveDomesticSeniorPlanTypeForGroup(plan_type)
+            ? resolveDomesticSeniorPlanTypeForGroup(plan_type, insured.has_medical_expense)
             : plan_type === '어르신플랜2'
               ? '어르신플랜2'
               : '어르신플랜1';

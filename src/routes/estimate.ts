@@ -3,6 +3,11 @@ import pool from '../config/database';
 import { sendEstimateEmail, calculateAge, calculatePremium, getInsuranceType } from '../services/emailService';
 import { generateAlimTalkMessage } from '../services/alimtalkMessageGenerator';
 import { sendAlimTalk } from '../services/aligoService';
+import {
+  DOMESTIC_BISILSOK_AGE,
+  DOMESTIC_SILSOK_AGE,
+  isDomesticMedicalExpenseOn,
+} from '../constants/domesticAgeBrackets';
 
 const router = Router();
 
@@ -25,29 +30,45 @@ const getBirthDateFromResidentNumber = (residentNumber: unknown): string => {
 const normalizeEstimatePlanTypeForPrint = (
   insuranceType: string,
   rawPlanType: unknown,
-  age?: number
+  age?: number,
+  hasMedicalExpense?: unknown
 ): string => {
   const raw = String(rawPlanType || '').trim();
   const p = raw.includes('|') ? raw.split('|')[0].trim() : raw;
   const a = Number.isFinite(age) ? Number(age) : null;
+  const silsok = isDomesticMedicalExpenseOn(hasMedicalExpense);
 
   const isDomestic = insuranceType.includes('국내');
   if (!isDomestic) return p || '실속플랜';
 
-  // 국내 기본 플랜 누락 시 나이대 기본값
-  if (!p) {
-    if (a !== null && a >= 91) return '어르신플랜2';
-    if (a !== null && a >= 71) return '어르신플랜1(실속)';
-    return '실속플랜';
+  if (p === '어르신플랜' || p === '어르신플랜1') {
+    return '어르신플랜1(실속)';
   }
 
-  // 국내 71~90세 레거시 값을 신규 표기로 정규화
-  if (p === '어르신플랜' || p === '어르신플랜1') return '어르신플랜1(실속)';
-  if (a !== null && a >= 71 && a <= 90) {
+  if (silsok) {
+    const seniorMin = DOMESTIC_SILSOK_AGE.seniorMin;
+    if (!p) {
+      if (a !== null && a >= seniorMin) return '어르신플랜1(실속)';
+      return '실속플랜';
+    }
+    if (a !== null && a >= seniorMin) {
+      if (p === '실속플랜' || p === '어르신플랜2') return '어르신플랜1(실속)';
+      if (p === '표준플랜') return '어르신플랜1(표준)';
+    }
+    return p;
+  }
+
+  // 비실손: 기존 71/90/91 구간 유지
+  if (!p) {
+    if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior2Min) return '어르신플랜2';
+    if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior1Min) return '어르신플랜1(실속)';
+    return '실속플랜';
+  }
+  if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior1Min && a <= DOMESTIC_BISILSOK_AGE.senior1Max) {
     if (p === '실속플랜') return '어르신플랜1(실속)';
     if (p === '표준플랜') return '어르신플랜1(표준)';
   }
-  if (a !== null && a >= 91) return '어르신플랜2';
+  if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior2Min) return '어르신플랜2';
   return p;
 };
 
@@ -252,17 +273,18 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         participant.plan_type ||
         participant.plan ||
         '';
-      const normalizedPlanType = normalizeEstimatePlanTypeForPrint(
-        submitInsuranceType,
-        rawPlanType,
-        age
-      );
       const rawHasMedicalExpense =
         participant.has_medical_expense ?? participant.hasMedicalExpense;
       const hasMedicalExpense =
         rawHasMedicalExpense === 0 || rawHasMedicalExpense === '0' || rawHasMedicalExpense === false
           ? 0
           : 1;
+      const normalizedPlanType = normalizeEstimatePlanTypeForPrint(
+        submitInsuranceType,
+        rawPlanType,
+        age,
+        hasMedicalExpense
+      );
 
       // 3. estimate_companions에 저장 (모든 피보험자)
       // 보험료는 나중에 계산하거나 0으로 설정
@@ -414,7 +436,8 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
         const planType = normalizeEstimatePlanTypeForPrint(
           insuranceType,
           companion.plan_type,
-          age
+          age,
+          companion.has_medical_expense
         );
         
         // 보험료가 0이면 계산
@@ -467,7 +490,12 @@ router.get('/api/estimate/:requestNumber', async (req: Request, res: Response) =
       const participantsWithPremium = [];
       for (const participant of participants) {
         const age = calculateAge(participant.birth_date);
-        const planType = normalizeEstimatePlanTypeForPrint(insuranceType, participant.planType, age);
+        const planType = normalizeEstimatePlanTypeForPrint(
+          insuranceType,
+          participant.planType,
+          age,
+          participant.has_medical_expense ?? participant.hasMedicalExpense
+        );
         const premium = await calculatePremium(
           insuranceType,
           age,

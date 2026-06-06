@@ -98,7 +98,7 @@ router.get('/notices/:id', async (req: Request, res: Response) => {
 
     // 상세 정보 조회
     const [rows] = await pool.execute<RowDataPacket[]>(
-      `SELECT id, title, content, author_name, view_count, created_at, updated_at 
+      `SELECT id, title, content, content_type, author_name, view_count, created_at, updated_at 
        FROM notices 
        WHERE id = ? AND is_deleted = 0`,
       [noticeId]
