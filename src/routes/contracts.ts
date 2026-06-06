@@ -1180,6 +1180,7 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
         birthDate: formatBirthDate(person.resident_number),
         planType: person.plan_type || '',
         premium: premium,
+        hasMedicalExpense: Boolean(person.has_medical_expense),
       };
     });
 
