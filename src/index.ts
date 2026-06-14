@@ -23,7 +23,7 @@ import estimateRoutes from './routes/estimate';
 import kakaoAddressRoutes from './routes/kakaoAddress';
 
 // 데이터베이스 연결 테스트
-import { testConnection } from './config/database';
+import { pingDatabase, testConnection } from './config/database';
 
 const app: Application = express();
 const PORT = process.env.PORT || 4000;
@@ -78,10 +78,22 @@ app.use('/', eventInsuranceRoutes);
 app.use('/', estimateRoutes);
 app.use('/', kakaoAddressRoutes);
 
-// 헬스 체크 라우트
-app.get('/api/health', (req: Request, res: Response) => {
+// 헬스 체크 라우트 (DB 연결 포함)
+app.get('/api/health', async (_req: Request, res: Response) => {
+  const dbOk = await pingDatabase();
+
+  if (!dbOk) {
+    return res.status(503).json({
+      status: 'degraded',
+      database: 'down',
+      message: 'B2C Backend API 서버는 실행 중이나 DB 연결에 실패했습니다.',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   res.json({
     status: 'ok',
+    database: 'up',
     message: 'B2C Backend API 서버가 정상 작동 중입니다.',
     timestamp: new Date().toISOString(),
   });

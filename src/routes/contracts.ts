@@ -1203,6 +1203,7 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
       participants,
       totalPremium: totalPremium,
       hasMedicalExpense: hasMedicalExpense === 1 || hasMedicalExpense === true,
+      insuranceType: contract.insurance_type || '-',
     });
   } catch (error) {
     console.error('피보험자 정보 조회 오류:', error);

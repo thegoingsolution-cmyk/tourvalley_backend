@@ -833,21 +833,23 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
     // 플랜별 추가 금액 조회 (해외여행보험만 적용)
     let additionalFee = 0;
     if (insurance_type === '해외여행보험') {
+      const hasMedicalExpenseValue = has_medical_expense ? 1 : 0;
       const [additionalFeeRows] = await pool.execute<any[]>(
         `SELECT additional_fee 
          FROM plan_additional_fees 
          WHERE insurance_type = ? 
            AND plan_type = ? 
            AND plan_variant = ?
+           AND has_medical_expense = ?
            AND is_active = 1
          ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
          LIMIT 1`,
-        [insurance_type, finalPlanType, planVariant]
+        [insurance_type, finalPlanType, planVariant, hasMedicalExpenseValue]
       );
 
       if (additionalFeeRows && additionalFeeRows.length > 0) {
         additionalFee = parseFloat(additionalFeeRows[0].additional_fee);
-        console.log('플랜별 추가 금액 (해외여행보험):', { plan: finalPlanType, additionalFee });
+        console.log('플랜별 추가 금액 (해외여행보험):', { plan: finalPlanType, hasMedicalExpenseValue, additionalFee });
       }
     }
 
@@ -3029,10 +3031,11 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
          WHERE insurance_type = ? 
            AND plan_type = ? 
            AND plan_variant = ?
+           AND has_medical_expense = ?
            AND is_active = 1
          ORDER BY COALESCE(effective_from_date, '1900-01-01') DESC, id DESC
          LIMIT 1`,
-        [insurance_type, finalPlanType, planVariant]
+        [insurance_type, finalPlanType, planVariant, hasMedicalExpenseValue]
       );
 
         if (additionalFeeRows && additionalFeeRows.length > 0) {
