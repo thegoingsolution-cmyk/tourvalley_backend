@@ -4,7 +4,6 @@ import { sendEstimateEmail, calculateAge, calculatePremium, getInsuranceType } f
 import { generateAlimTalkMessage } from '../services/alimtalkMessageGenerator';
 import { sendAlimTalk } from '../services/aligoService';
 import {
-  DOMESTIC_BISILSOK_AGE,
   DOMESTIC_SILSOK_AGE,
   isDomesticMedicalExpenseOn,
 } from '../constants/domesticAgeBrackets';
@@ -41,34 +40,19 @@ const normalizeEstimatePlanTypeForPrint = (
   const isDomestic = insuranceType.includes('국내');
   if (!isDomestic) return p || '실속플랜';
 
-  if (p === '어르신플랜' || p === '어르신플랜1') {
+  if (p === '어르신플랜' || p === '어르신플랜1' || p === '어르신플랜2') {
     return '어르신플랜1(실속)';
   }
 
-  if (silsok) {
-    const seniorMin = DOMESTIC_SILSOK_AGE.seniorMin;
-    if (!p) {
-      if (a !== null && a >= seniorMin) return '어르신플랜1(실속)';
-      return '실속플랜';
-    }
-    if (a !== null && a >= seniorMin) {
-      if (p === '실속플랜' || p === '어르신플랜2') return '어르신플랜1(실속)';
-      if (p === '표준플랜') return '어르신플랜1(표준)';
-    }
-    return p;
-  }
-
-  // 비실손: 기존 71/90/91 구간 유지
+  const seniorMin = DOMESTIC_SILSOK_AGE.seniorMin;
   if (!p) {
-    if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior2Min) return '어르신플랜2';
-    if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior1Min) return '어르신플랜1(실속)';
+    if (a !== null && a >= seniorMin) return '어르신플랜1(실속)';
     return '실속플랜';
   }
-  if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior1Min && a <= DOMESTIC_BISILSOK_AGE.senior1Max) {
+  if (a !== null && a >= seniorMin) {
     if (p === '실속플랜') return '어르신플랜1(실속)';
-    if (p === '표준플랜') return '어르신플랜1(표준)';
+    if (p === '표준플랜') return silsok ? '어르신플랜1(표준)' : '어르신플랜1(표준)';
   }
-  if (a !== null && a >= DOMESTIC_BISILSOK_AGE.senior2Min) return '어르신플랜2';
   return p;
 };
 
