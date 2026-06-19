@@ -96,6 +96,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       contractor_phone,
       contractor_email,
       participants,
+      travel_region,
+      travel_country,
       affiliate: bodyAffiliate,
       access_path: bodyAccessPath,
     } = req.body;
@@ -130,6 +132,28 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       });
     }
 
+    const resolvedTravelCountry =
+      travel_country && String(travel_country).trim()
+        ? String(travel_country).trim()
+        : null;
+    let resolvedTravelRegion =
+      travel_region !== undefined && travel_region !== null && String(travel_region).trim()
+        ? String(travel_region).trim()
+        : null;
+
+    if (product_cd === '국내여행') {
+      resolvedTravelRegion = '전국일원';
+    } else if (product_cd === '해외여행') {
+      resolvedTravelRegion = null;
+      if (!resolvedTravelCountry) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: '여행국가를 선택해주세요.',
+        });
+      }
+    }
+
     // 견적 신청번호 생성 (트랜잭션 내에서 안전하게 생성)
     const requestNumber = await generateRequestNumber(connection);
 
@@ -147,10 +171,12 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
+        travel_region,
+        travel_country,
         affiliate,
         access_path,
         status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         requestNumber,
         product_cd,
@@ -163,6 +189,8 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         contractor_name,
         contractor_phone,
         contractor_email,
+        resolvedTravelRegion,
+        resolvedTravelCountry,
         resolvedAffiliate,
         resolvedAccessPath,
         '견적신청',
