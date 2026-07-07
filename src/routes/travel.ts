@@ -1233,9 +1233,8 @@ router.post('/api/travel/register-contract', async (req: Request, res: Response)
     if (payment?.payment_sub_method === '무통장입금') {
       const receiverPhone = contractor?.mobile_phone || contractor?.phone;
       if (receiverPhone) {
-        const totalPremium = Number(payment.amount ?? contract.total_premium ?? 0);
-        const useAccidentFreeCash = Math.max(0, Number(payment.use_accident_free_cash) || 0);
-        const amountToPay = Math.max(0, totalPremium - useAccidentFreeCash);
+        // payment.amount = 프론트 결제금액(receiptPremium, 캐시 차감 후). total_premium에서 캐시를 다시 빼면 이중 차감됨
+        const amountToPay = Math.max(0, Number(payment.amount ?? 0));
         if (amountToPay > 0) {
           const expectedDate = payment.expected_deposit_date;
           const expectedDateText = expectedDate
