@@ -32,9 +32,28 @@ const shouldSendContractCompleteAlimTalk = (paymentMethod?: string | null, payme
   return true;
 };
 
-const getInsuranceCompanyName = (insuranceType?: string | null) => {
-  const type = (insuranceType || '').toLowerCase();
-  if (type.includes('장기')) {
+// 관리자 백엔드 resolveTravelDetailInsuranceCompanyName 와 동일 기준으로 판별
+const LONG_TERM_INSURANCE_TYPES = new Set([
+  '유학/어학연수',
+  '워킹홀리데이',
+  '해외출장/주재원/교환교수',
+]);
+
+const isTradeAssociationMemberType = (memberType?: string | null): boolean =>
+  memberType === '한국무역협회 회원사' || memberType === '무역협회';
+
+const getInsuranceCompanyName = (
+  insuranceType?: string | null,
+  memberType?: string | null
+) => {
+  const it = (insuranceType || '').trim();
+  // 세부 상품명(유학/어학연수 등)뿐 아니라 '해외장기체류' 계열 표기도 장기로 인정
+  const isLongTerm = LONG_TERM_INSURANCE_TYPES.has(it) || it.includes('장기');
+
+  if (isTradeAssociationMemberType(memberType) && (it === '해외여행보험' || isLongTerm)) {
+    return '현대해상';
+  }
+  if (isLongTerm) {
     return '메리츠화재';
   }
   return '라이나손해보험';
@@ -70,7 +89,8 @@ export const sendContractCompleteAlimTalk = async (
       ctr.company_name,
       ctr.contractor_type,
       m.name as member_name,
-      m.mobile_phone as member_phone
+      m.mobile_phone as member_phone,
+      m.member_type as member_type
      FROM travel_contracts tc
      LEFT JOIN contractors ctr ON tc.id = ctr.contract_id
      LEFT JOIN members m ON tc.member_id = m.id
@@ -109,7 +129,7 @@ export const sendContractCompleteAlimTalk = async (
   )}`;
 
   const insuranceProduct = contract.insurance_type || '';
-  const insuranceCompany = getInsuranceCompanyName(contract.insurance_type);
+  const insuranceCompany = getInsuranceCompanyName(contract.insurance_type, contract.member_type);
   const totalPremium = Number(contract.total_premium || 0);
   const formattedPremium = totalPremium ? `${totalPremium.toLocaleString()}원` : '0원';
 
