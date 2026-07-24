@@ -11,6 +11,7 @@ import { sendSms } from '../services/aligoService';
 import {
   addInsuranceCalendarMonthsFromKstInstant,
   getKstCalendarDateNow,
+  isDepartureAtLeastTwoHoursFromNowKst,
   parseDateTimeAsKst,
   toKstDateTimeStringForApi,
 } from '../utils/dateTime';
@@ -104,6 +105,54 @@ const normalizeDatetimeForDb = (datetime: string | null | undefined): string => 
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${mo}-${day} 00:00:00`;
 };
+
+function validateContractTravelDates(
+  insuranceType: string | undefined,
+  departureDateStr: string | undefined,
+  arrivalDateStr: string | undefined
+): { valid: boolean; message?: string } {
+  if (!departureDateStr || !arrivalDateStr) {
+    return { valid: false, message: '출발일시와 도착일시가 필요합니다.' };
+  }
+
+  const departure =
+    parseDateTimeAsKst(normalizeDatetimeForDb(departureDateStr)) ??
+    parseDateTimeAsKst(departureDateStr);
+  const arrival =
+    parseDateTimeAsKst(normalizeDatetimeForDb(arrivalDateStr)) ??
+    parseDateTimeAsKst(arrivalDateStr);
+
+  if (
+    !departure ||
+    !arrival ||
+    Number.isNaN(departure.getTime()) ||
+    Number.isNaN(arrival.getTime())
+  ) {
+    return { valid: false, message: '출발일시와 도착일시가 올바르지 않습니다.' };
+  }
+
+  if (arrival.getTime() <= departure.getTime()) {
+    return { valid: false, message: '도착일시는 출발일시보다 이후여야 합니다.' };
+  }
+
+  if (!isDepartureAtLeastTwoHoursFromNowKst(departure)) {
+    return { valid: false, message: '출발시간은 가입시점 2시간 뒤부터 설정 가능합니다.' };
+  }
+
+  if (insuranceType === '국내여행보험') {
+    const maxArrival = addInsuranceCalendarMonthsFromKstInstant(departure, 1);
+    if (maxArrival && arrival.getTime() > maxArrival.getTime()) {
+      return { valid: false, message: '국내여행보험은 최대 1개월까지 가능합니다.' };
+    }
+  } else if (insuranceType === '해외여행보험') {
+    const maxArrival = addInsuranceCalendarMonthsFromKstInstant(departure, 3);
+    if (maxArrival && arrival.getTime() > maxArrival.getTime()) {
+      return { valid: false, message: '해외여행보험은 최대 3개월까지 가능합니다.' };
+    }
+  }
+
+  return { valid: true };
+}
 
 const getRateLookupCriteria = (
   insuranceType: string,
@@ -572,6 +621,12 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
     // 보험기간 계산 (일수): 입력값을 KST로 해석, 부분일은 1일로 올림
     const departure = parseDateTimeAsKst(departure_date) ?? new Date(departure_date);
     const arrival = parseDateTimeAsKst(arrival_date) ?? new Date(arrival_date);
+    if (arrival.getTime() <= departure.getTime()) {
+      return res.status(400).json({
+        success: false,
+        message: '도착일시는 출발일시보다 이후여야 합니다.',
+      });
+    }
     const diffTime = arrival.getTime() - departure.getTime();
     const periodDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
     const rateLookupPeriodDays = resolveOverseasShortTripRateLookupPeriodDays(
@@ -594,6 +649,13 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       return res.status(400).json({
         success: false,
         message: '도착일시는 출발일시보다 이후여야 합니다.',
+      });
+    }
+
+    if (!isDepartureAtLeastTwoHoursFromNowKst(departure)) {
+      return res.status(400).json({
+        success: false,
+        message: '출발시간은 가입시점 2시간 뒤부터 설정 가능합니다.',
       });
     }
 
@@ -930,6 +992,19 @@ const PG_INSTANT_COMPLETE_METHODS = ['나이스페이먼츠', '네이버페이',
 router.post('/api/travel/register-contract', async (req: Request, res: Response) => {
   if (req.body?.join_contract_id) {
     return handleBizplayRegisterContract(req, res);
+  }
+
+  const { contract } = req.body;
+  const travelDateValidation = validateContractTravelDates(
+    contract?.insurance_type,
+    contract?.departure_date,
+    contract?.arrival_date
+  );
+  if (!travelDateValidation.valid) {
+    return res.status(400).json({
+      success: false,
+      message: travelDateValidation.message,
+    });
   }
 
   const connection = await pool.getConnection();

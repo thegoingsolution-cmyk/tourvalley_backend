@@ -88,3 +88,16 @@ export function getKstCalendarDateNow(): Date {
     `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T12:00:00+09:00`
   );
 }
+
+const MIN_DEPARTURE_LEAD_MS = 2 * 60 * 60 * 1000;
+
+/** 출발일시가 KST 기준 현재 시 0분 + 2시간 이후인지 */
+export function isDepartureAtLeastTwoHoursFromNowKst(departure: Date): boolean {
+  if (Number.isNaN(departure.getTime())) return false;
+  const kstNow = toKstDateTimeStringForApi(new Date());
+  const m = kstNow.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):/);
+  if (!m) return false;
+  const currentHourStart = parseDateTimeAsKst(`${m[1]}-${m[2]}-${m[3]} ${m[4]}:00:00`);
+  if (!currentHourStart) return false;
+  return departure.getTime() >= currentHourStart.getTime() + MIN_DEPARTURE_LEAD_MS;
+}
