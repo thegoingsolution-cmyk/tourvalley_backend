@@ -16,6 +16,7 @@ import {
   toKstDateTimeStringForApi,
 } from '../utils/dateTime';
 import { withB2cPgProductPrefix } from '../utils/b2cPgProductName';
+import { calculateFinalPremium } from '../utils/premiumCalculation';
 
 const router = Router();
 type RawBodyRequest = Request & { rawBody?: Buffer };
@@ -913,10 +914,9 @@ router.post('/api/travel/calculate-premium', async (req: Request, res: Response)
       }
     }
 
-    // 최종 보험료 계산: (연간보험료 × (단기요율 / 100)) + 플랜별 추가 금액
-    // 단수처리: 최종 보험료 십원단위 절사 (예: 317852.5 → 317850)
+    // 최종 보험료 계산: ROUNDDOWN(ROUND(연간보험료×요율,0)+추가금액,-1)
     const calculatedPremium = annualPremium * (shortTermRate / 100);
-    const finalPremium = Math.floor((calculatedPremium + additionalFee) / 10) * 10;
+    const finalPremium = calculateFinalPremium(annualPremium, shortTermRate, additionalFee);
 
     console.log('최종 계산:', {
       annualPremium,
@@ -3115,10 +3115,9 @@ router.post('/api/travel/calculate-group-premium', async (req: Request, res: Res
         }
       }
 
-      // 최종 보험료 계산: (연간보험료 × (단기요율 / 100)) + 플랜별 추가 금액
-      // 단수처리: 최종 보험료 십원단위 절사
+      // 최종 보험료 계산: ROUNDDOWN(ROUND(연간보험료×요율,0)+추가금액,-1)
       const calculatedPremium = annualPremium * (shortTermRate / 100);
-      const finalPremium = Math.floor((calculatedPremium + additionalFee) / 10) * 10;
+      const finalPremium = calculateFinalPremium(annualPremium, shortTermRate, additionalFee);
 
       totalPremium += finalPremium;
 

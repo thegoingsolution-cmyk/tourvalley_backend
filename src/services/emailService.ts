@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import pool from '../config/database';
 import { parseDateTimeAsKst } from '../utils/dateTime';
+import { calculateFinalPremium } from '../utils/premiumCalculation';
 
 dotenv.config();
 
@@ -175,9 +176,9 @@ export const calculatePremium = async (
       }
     }
 
-    // 최종 보험료 계산: 십원단위 절사
+    // 최종 보험료 계산: ROUNDDOWN(ROUND(연간보험료×요율,0), -1)
     const calculatedPremium = annualPremium * (shortTermRate / 100);
-    const finalPremium = Math.floor(calculatedPremium / 10) * 10;
+    const finalPremium = calculateFinalPremium(annualPremium, shortTermRate);
 
     return finalPremium;
   } catch (error) {
