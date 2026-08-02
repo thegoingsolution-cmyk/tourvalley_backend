@@ -8,17 +8,19 @@ const maxIdle = parseInt(process.env.DB_MAX_IDLE || '3', 10);
 const acquireTimeoutMs = parseInt(process.env.DB_ACQUIRE_TIMEOUT_MS || '10000', 10);
 const queueLimit = parseInt(process.env.DB_QUEUE_LIMIT || '50', 10);
 
-/** Queue/acquire 고갈이 이 횟수 이상 연속(윈도우 내)이면 process.exit → PM2 autorestart */
-const poolExhaustionExitThreshold = parseInt(
-  process.env.DB_POOL_EXHAUSTION_EXIT_THRESHOLD || '5',
-  10
-);
-const poolExhaustionWindowMs = parseInt(
-  process.env.DB_POOL_EXHAUSTION_WINDOW_MS || '30000',
-  10
-);
-const poolExhaustionRestartEnabled =
-  (process.env.DB_POOL_EXHAUSTION_RESTART || 'true').toLowerCase() !== 'false';
+/** Queue/acquire 고갈이 이 횟수 이상 연속(윈도우 내)이면 process.exit → PM2 autorestart
+ *  ※ 자동 재기동은 비활성화됨 (카카오페이 등 결제 콜백 중 exit 시 미결제 상태 남는 위험)
+ */
+// const poolExhaustionExitThreshold = parseInt(
+//   process.env.DB_POOL_EXHAUSTION_EXIT_THRESHOLD || '5',
+//   10
+// );
+// const poolExhaustionWindowMs = parseInt(
+//   process.env.DB_POOL_EXHAUSTION_WINDOW_MS || '30000',
+//   10
+// );
+// const poolExhaustionRestartEnabled =
+//   (process.env.DB_POOL_EXHAUSTION_RESTART || 'true').toLowerCase() !== 'false';
 
 const poolOptions: PoolOptions = {
   host: process.env.DB_HOST || 'localhost',
@@ -79,43 +81,53 @@ const isPoolExhaustedError = (error: unknown): boolean => {
   );
 };
 
-let poolExhaustionHits = 0;
-let poolExhaustionWindowStart = 0;
-let poolRestartScheduled = false;
+// let poolExhaustionHits = 0;
+// let poolExhaustionWindowStart = 0;
+// let poolRestartScheduled = false;
 
 /**
  * 풀 고갈이 단발이면 요청만 실패시키고,
  * 짧은 시간 안에 반복되면 PM2가 잡을 수 있게 process.exit(1).
  * (커넥션 릭/좀비 대기로 프로세스만 살아 있는 상태 해소)
+ * ※ 자동 재기동 비활성화 — 로그만 남김
  */
 const maybeRestartOnPoolExhaustion = (error: unknown): void => {
-  if (!poolExhaustionRestartEnabled || !isPoolExhaustedError(error)) {
+  if (!isPoolExhaustedError(error)) {
     return;
   }
 
-  const now = Date.now();
-  if (now - poolExhaustionWindowStart > poolExhaustionWindowMs) {
-    poolExhaustionWindowStart = now;
-    poolExhaustionHits = 0;
-  }
-
-  poolExhaustionHits += 1;
-
   console.error(
-    `[DB pool] exhausted (${poolExhaustionHits}/${poolExhaustionExitThreshold} in ${poolExhaustionWindowMs}ms):`,
+    '[DB pool] exhausted (auto-restart disabled):',
     error instanceof Error ? error.message : error
   );
 
-  if (poolExhaustionHits < poolExhaustionExitThreshold || poolRestartScheduled) {
-    return;
-  }
-
-  poolRestartScheduled = true;
-  console.error(
-    '[DB pool] repeated exhaustion — exiting process for PM2 autorestart (clears stuck pool)'
-  );
-  // 진행 중 로그 flush 여유
-  setTimeout(() => process.exit(1), 500);
+  // if (!poolExhaustionRestartEnabled || !isPoolExhaustedError(error)) {
+  //   return;
+  // }
+  //
+  // const now = Date.now();
+  // if (now - poolExhaustionWindowStart > poolExhaustionWindowMs) {
+  //   poolExhaustionWindowStart = now;
+  //   poolExhaustionHits = 0;
+  // }
+  //
+  // poolExhaustionHits += 1;
+  //
+  // console.error(
+  //   `[DB pool] exhausted (${poolExhaustionHits}/${poolExhaustionExitThreshold} in ${poolExhaustionWindowMs}ms):`,
+  //   error instanceof Error ? error.message : error
+  // );
+  //
+  // if (poolExhaustionHits < poolExhaustionExitThreshold || poolRestartScheduled) {
+  //   return;
+  // }
+  //
+  // poolRestartScheduled = true;
+  // console.error(
+  //   '[DB pool] repeated exhaustion — exiting process for PM2 autorestart (clears stuck pool)'
+  // );
+  // // 진행 중 로그 flush 여유
+  // setTimeout(() => process.exit(1), 500);
 };
 
 const withRetry = async <T>(
