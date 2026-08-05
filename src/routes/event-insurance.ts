@@ -14,9 +14,10 @@ const router = Router();
 // nginx: location /uploads/ { alias /home/b2c/uploads/; } 로 정적 파일 서빙
 const UPLOAD_BASE_PATH = process.env.UPLOAD_PATH || path.resolve(__dirname, '../../../uploads');
 
-// 업로드 디렉토리 생성 (business, contracts)
+// 업로드 디렉토리 생성 (business, contracts, amusement)
 const businessDir = path.join(UPLOAD_BASE_PATH, 'business');
 const contractsDir = path.join(UPLOAD_BASE_PATH, 'contracts');
+const amusementDir = path.join(UPLOAD_BASE_PATH, 'amusement');
 
 // 디렉토리 생성 (에러 처리 추가)
 try {
@@ -25,6 +26,9 @@ try {
   }
   if (!fs.existsSync(contractsDir)) {
     fs.mkdirSync(contractsDir, { recursive: true });
+  }
+  if (!fs.existsSync(amusementDir)) {
+    fs.mkdirSync(amusementDir, { recursive: true });
   }
 } catch (error) {
   console.error('업로드 디렉토리 생성 실패:', error);
@@ -39,6 +43,8 @@ const storage = multer.diskStorage({
       cb(null, businessDir);
     } else if (file.fieldname === 'overview') {
       cb(null, contractsDir);
+    } else if (file.fieldname === 'amusement_photos') {
+      cb(null, amusementDir);
     } else {
       cb(null, businessDir); // 기본값
     }
@@ -163,10 +169,82 @@ function formatDeductible(value: string | undefined): string | null {
   return `${numValue}만`;
 }
 
+/** '유'/'무' 또는 boolean-ish → ENUM('유','무') */
+function parseYuMu(value: unknown, defaultVal: '유' | '무' = '무'): '유' | '무' {
+  if (value === '유' || value === true || value === 'true' || value === '1' || value === 1 || value === 'Y' || value === 'y') {
+    return '유';
+  }
+  if (value === '무' || value === false || value === 'false' || value === '0' || value === 0 || value === 'N' || value === 'n') {
+    return '무';
+  }
+  if (typeof value === 'string' && value.trim() === '유') return '유';
+  if (typeof value === 'string' && value.trim() === '무') return '무';
+  return defaultVal;
+}
+
+/** 특약 on/off → 0|1 (false/'0'/빈값 = 0) */
+function parseCovFlag(value: unknown, defaultOn = false): 0 | 1 {
+  if (value === undefined || value === null || value === '') {
+    return defaultOn ? 1 : 0;
+  }
+  if (value === false || value === 'false' || value === '0' || value === 0 || value === 'N' || value === 'n' || value === '무' || value === 'off') {
+    return 0;
+  }
+  if (value === true || value === 'true' || value === '1' || value === 1 || value === 'Y' || value === 'y' || value === '유' || value === 'on') {
+    return 1;
+  }
+  return defaultOn ? 1 : 0;
+}
+
+/** risk_detail JSON 문자열 또는 객체 → MySQL JSON용 문자열 */
+function normalizeRiskDetail(raw: unknown): string | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    try {
+      JSON.parse(trimmed);
+      return trimmed;
+    } catch {
+      return JSON.stringify(trimmed);
+    }
+  }
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return null;
+  }
+}
+
+function resolveEventLocation(body: Record<string, any>): string {
+  const preferred = String(body.event_location || '').trim();
+  if (preferred) return preferred;
+
+  const locationType = String(body.location_type || '').trim();
+  const isMulti =
+    locationType === 'multi' ||
+    locationType === '복수' ||
+    locationType === '복수장소' ||
+    locationType === '이동';
+
+  if (isMulti) {
+    const from = String(body.route_from || '').trim();
+    const via = String(body.route_via || '').trim();
+    const to = String(body.route_to || '').trim();
+    const parts = [from, via, to].filter(Boolean);
+    if (parts.length) return `[이동] ${parts.join(' → ')}`;
+  }
+
+  const singleText = String(body.region || body.event_location || '').trim();
+  if (singleText) return singleText;
+  return extractEventLocation(String(body.event_name || ''));
+}
+
 // 행사보험 견적 신청
 router.post('/api/event-insurance/estimate', upload.fields([
   { name: 'license', maxCount: 1 },
-  { name: 'overview', maxCount: 1 }
+  { name: 'overview', maxCount: 1 },
+  { name: 'amusement_photos', maxCount: 10 },
 ]), async (req: Request, res: Response) => {
   const connection = await pool.getConnection();
   
@@ -179,6 +257,7 @@ router.post('/api/event-insurance/estimate', upload.fields([
     console.log('UPLOAD_BASE_PATH:', UPLOAD_BASE_PATH);
     console.log('businessDir:', businessDir);
     console.log('contractsDir:', contractsDir);
+    console.log('amusementDir:', amusementDir);
 
     const files = req.files as { [fieldname: string]: Express.Multer.File[] };
 
@@ -201,29 +280,97 @@ router.post('/api/event-insurance/estimate', upload.fields([
         console.error('[overview] 파일 저장 실패 - 경로에 파일이 없습니다:', ovPath);
       }
     }
+    if (files?.amusement_photos?.length) {
+      for (const photo of files.amusement_photos) {
+        const photoPath = (photo as any).path || path.join(amusementDir, photo.filename);
+        const exists = fs.existsSync(photoPath);
+        console.log('[amusement_photos] 저장경로:', photoPath, '| 파일존재:', exists);
+        if (!exists) {
+          console.error('[amusement_photos] 파일 저장 실패 - 경로에 파일이 없습니다:', photoPath);
+        }
+      }
+    }
 
     // 파일 경로 (nginx 설정에 맞춰 /uploads/ 경로 사용)
-    const licenseFile = files?.license
+    const licenseFile = files?.license?.[0]
       ? `/uploads/business/${files.license[0].filename}`
       : null;
-    const overviewFile = files?.overview
+    const overviewFile = files?.overview?.[0]
       ? `/uploads/contracts/${files.overview[0].filename}`
       : null;
+    const amusementPhotoPaths = (files?.amusement_photos || []).map(
+      (f) => `/uploads/amusement/${f.filename}`
+    );
+    const amusementPhotosJson =
+      amusementPhotoPaths.length > 0 ? JSON.stringify(amusementPhotoPaths) : null;
 
     const contract_number = generateContractNumber();
 
-    // action_info 파싱 (예: "AT/FW/WR/PF/DR/ET")
+    // action_info 파싱 (예: "AT/FW/WR/PF/DR/ET/MV")
     const actionInfo = req.body.action_info || '';
-    const actionInfoArray = actionInfo.split('/').filter((v: string) => v);
-    
+    const actionInfoArray = String(actionInfo)
+      .split(/[\/,|]/)
+      .map((v: string) => v.trim())
+      .filter((v: string) => v);
+
     const sports_event = actionInfoArray.includes('AT') ? '유' : '무';
     const fireworks = actionInfoArray.includes('FW') ? '유' : '무';
     const water_hazard = actionInfoArray.includes('WR') ? '유' : '무';
     const amusement_facilities = actionInfoArray.includes('PF') ? '유' : '무';
     const drone = actionInfoArray.includes('DR') ? '유' : '무';
     const other = actionInfoArray.includes('ET') ? '유' : '무';
+    const moving_parade = actionInfoArray.includes('MV') ? '유' : '무';
 
-    const event_location = extractEventLocation(req.body.event_name || '');
+    const event_form_type = req.body.event_form_type ? String(req.body.event_form_type).trim() : null;
+    const event_category = req.body.event_category ? String(req.body.event_category).trim() : null;
+    const venue_type = req.body.venue_type ? String(req.body.venue_type).trim() : null;
+    const location_type = req.body.location_type ? String(req.body.location_type).trim() : null;
+    const route_from = req.body.route_from ? String(req.body.route_from).trim() : null;
+    const route_via = req.body.route_via ? String(req.body.route_via).trim() : null;
+    const route_to = req.body.route_to ? String(req.body.route_to).trim() : null;
+    const move_note = req.body.move_note ? String(req.body.move_note).trim() : null;
+    const event_location = resolveEventLocation(req.body);
+    const has_performer = parseYuMu(req.body.has_performer, '무');
+    const risk_detail = normalizeRiskDetail(req.body.risk_detail);
+    const budget_type = req.body.budget_type ? String(req.body.budget_type).trim() : null;
+    const budgetAmountRaw = req.body.budget_amount != null && req.body.budget_amount !== ''
+      ? parseInt(String(req.body.budget_amount).replace(/,/g, ''), 10)
+      : NaN;
+    const budget_amount = Number.isFinite(budgetAmountRaw) ? budgetAmountRaw : null;
+    const marketing_consent = parseCovFlag(req.body.marketing_consent, false);
+    const department = req.body.department ? String(req.body.department).trim() : null;
+
+    // plan_label은 quote_plans.label 전용 (event_contracts 컬럼 아님)
+    const planLabelRaw = String(req.body.plan_label || '').trim();
+    const plan_label =
+      planLabelRaw === '1형' || planLabelRaw === '2형' || planLabelRaw === '직접입력'
+        ? planLabelRaw
+        : (planLabelRaw || '직접입력');
+
+    const participants = parseInt(req.body.insured_cnt, 10) || 1;
+
+    // 특약 플래그 / 금액 (만원 단위 — 기존 format* 헬퍼 사용)
+    const cov_pmed = parseCovFlag(req.body.cov_pmed, true);
+    const cov_food = parseCovFlag(req.body.cov_food, false);
+    const cov_install = parseCovFlag(req.body.cov_install, false);
+    const cov_rented = parseCovFlag(req.body.cov_rented, false);
+    const cov_bailee = parseCovFlag(req.body.cov_bailee, false);
+
+    const personal_liability_per_person = formatCoverageAmount(req.body.bi_person);
+    const personal_liability_per_accident = formatCoverageAmount(req.body.bi_occurence);
+    const property_damage_per_accident = formatCoverageAmount(req.body.pi_occurence);
+    const deductible_per_accident = formatDeductible(req.body.dt_occurence);
+
+    const medical_expense_per_person =
+      cov_pmed === 0 ? '가입안함' : formatMedicalExpense(req.body.me_person);
+    const medical_expense_per_accident =
+      cov_pmed === 0 ? '가입안함' : formatMedicalExpense(req.body.me_occurence);
+
+    const food_per_accident = formatCoverageAmount(req.body.food_per_accident);
+    const food_deductible = formatDeductible(req.body.food_deductible);
+    const install_per_accident = formatCoverageAmount(req.body.install_per_accident);
+    const rented_per_accident = formatCoverageAmount(req.body.rented_per_accident);
+    const bailee_per_accident = formatCoverageAmount(req.body.bailee_per_accident);
 
     // 회원 ID 처리 (있으면 회원 견적, 없으면 비회원 견적)
     let memberId: number | null = null;
@@ -239,33 +386,50 @@ router.post('/api/event-insurance/estimate', upload.fields([
 
     console.log('=== 견적 신청 데이터 확인 ===');
     console.log('회원 ID:', memberId);
+    console.log('event_form_type:', event_form_type, '| event_category:', event_category);
+    console.log('location_type:', location_type, '| event_location:', event_location);
+    console.log('plan_label:', plan_label, '| has_performer:', has_performer);
     console.log('보험시작일시:', req.body.start_date);
     console.log('보험종료일시:', req.body.end_date);
     console.log('보험가입조건:');
     console.log('  - bi_person (대인배상 1인당):', req.body.bi_person);
     console.log('  - bi_occurence (대인배상 1사고당):', req.body.bi_occurence);
     console.log('  - pi_occurence (대물배상 1사고당):', req.body.pi_occurence);
-    console.log('  - me_person (참가자치료비 1인당):', req.body.me_person);
-    console.log('  - me_occurence (참가자치료비 1사고당):', req.body.me_occurence);
+    console.log('  - cov_pmed / me_person / me_occurence:', cov_pmed, req.body.me_person, req.body.me_occurence);
     console.log('  - dt_occurence (자기부담금 1사고당):', req.body.dt_occurence);
+    console.log('  - cov_food/install/rented/bailee:', cov_food, cov_install, cov_rented, cov_bailee);
 
-    // 1. 계약 정보 저장 (견적 신청 상태)
+    // 1. 계약 정보 저장 (신규접수)
     const [contractResult] = await connection.execute<any>(
       `INSERT INTO event_contracts (
-        contract_number, insurance_type, insurance_company, event_name, event_location,
-        participants, start_date, end_date, sports_event, water_hazard, drone, fireworks,
-        amusement_facilities, other, personal_liability_per_person, personal_liability_per_accident,
+        contract_number, insurance_type, insurance_company, event_name,
+        event_form_type, event_category, event_location, venue_type, location_type,
+        route_from, route_via, route_to, move_note,
+        participants, has_performer, start_date, end_date,
+        sports_event, water_hazard, drone, fireworks,
+        amusement_facilities, other, moving_parade, risk_detail,
+        personal_liability_per_person, personal_liability_per_accident,
         property_damage_per_accident, medical_expense_per_person, medical_expense_per_accident,
-        deductible_per_accident, premium, business_registration_file, event_outline_file,
+        deductible_per_accident, budget_type, budget_amount, marketing_consent,
+        premium, business_registration_file, event_outline_file, amusement_photos,
         member_id, affiliate, device, access_path, status, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         contract_number,
         '행사주최자배상책임보험',
         '', // 보험회사는 나중에 지정
         req.body.event_name,
+        event_form_type,
+        event_category,
         event_location,
-        parseInt(req.body.insured_cnt) || 1,
+        venue_type,
+        location_type,
+        route_from,
+        route_via,
+        route_to,
+        move_note,
+        participants,
+        has_performer,
         req.body.start_date,
         req.body.end_date,
         sports_event,
@@ -274,20 +438,26 @@ router.post('/api/event-insurance/estimate', upload.fields([
         fireworks,
         amusement_facilities,
         other,
-        formatCoverageAmount(req.body.bi_person),
-        formatCoverageAmount(req.body.bi_occurence),
-        formatCoverageAmount(req.body.pi_occurence),
-        formatMedicalExpense(req.body.me_person),
-        formatMedicalExpense(req.body.me_occurence),
-        formatDeductible(req.body.dt_occurence),
+        moving_parade,
+        risk_detail,
+        personal_liability_per_person,
+        personal_liability_per_accident,
+        property_damage_per_accident,
+        medical_expense_per_person,
+        medical_expense_per_accident,
+        deductible_per_accident,
+        budget_type,
+        budget_amount,
+        marketing_consent,
         0, // 견적 신청 시점에는 보험료 미정
         licenseFile,
         overviewFile,
-        memberId, // 로그인한 회원이면 member_id, 아니면 null
+        amusementPhotosJson,
+        memberId,
         resolvedAffiliate,
         req.body.device || 'PC',
         resolvedAccessPath,
-        '등록', // 견적신청 상태
+        '신규접수',
         null, // 시스템 자동 등록
       ]
     );
@@ -297,16 +467,54 @@ router.post('/api/event-insurance/estimate', upload.fields([
     // 2. 계약자 정보 저장
     await connection.execute<any>(
       `INSERT INTO event_contractors (
-        contract_id, contractor, business_number, contact_person, email, mobile_phone, phone
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        contract_id, contractor, business_number, contact_person, department, email, mobile_phone, phone
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         contract_id,
         req.body.contractor_name,
         req.body.registration_no,
         req.body.incharge,
+        department,
         req.body.email,
         req.body.ctel_no,
         req.body.tel_no,
+      ]
+    );
+
+    // 3. 견적안 1건 (plan_label → label, 대표 견적)
+    await connection.execute<any>(
+      `INSERT INTO event_contract_quote_plans (
+        contract_id, quote_no, label, people, is_primary,
+        personal_liability_per_person, personal_liability_per_accident,
+        property_damage_per_accident, deductible_per_accident,
+        medical_expense_per_person, medical_expense_per_accident, cov_pmed,
+        cov_food, food_per_accident, food_deductible,
+        cov_install, install_per_accident,
+        cov_rented, rented_per_accident,
+        cov_bailee, bailee_per_accident
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        contract_id,
+        1,
+        plan_label,
+        participants,
+        1,
+        personal_liability_per_person,
+        personal_liability_per_accident,
+        property_damage_per_accident,
+        deductible_per_accident,
+        medical_expense_per_person,
+        medical_expense_per_accident,
+        cov_pmed,
+        cov_food,
+        food_per_accident,
+        food_deductible,
+        cov_install,
+        install_per_accident,
+        cov_rented,
+        rented_per_accident,
+        cov_bailee,
+        bailee_per_accident,
       ]
     );
 
