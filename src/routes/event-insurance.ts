@@ -216,18 +216,39 @@ function normalizeRiskDetail(raw: unknown): string | null {
   }
 }
 
+function parsePlaces(raw: unknown): string[] {
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (Array.isArray(raw)) {
+    return raw.map((v) => String(v || '').trim()).filter(Boolean);
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => String(v || '').trim()).filter(Boolean);
+      }
+    } catch {
+      // comma / slash separated fallback
+      return trimmed.split(/\s*[\/,|]\s*/).map((v) => v.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
 function resolveEventLocation(body: Record<string, any>): string {
   const preferred = String(body.event_location || '').trim();
   if (preferred) return preferred;
 
   const locationType = String(body.location_type || '').trim();
-  const isMulti =
-    locationType === 'multi' ||
-    locationType === '복수' ||
-    locationType === '복수장소' ||
-    locationType === '이동';
 
-  if (isMulti) {
+  if (locationType === '복수' || locationType === '복수장소' || locationType === 'multi') {
+    const places = parsePlaces(body.places);
+    if (places.length) return `[복수] ${places.join(' / ')}`;
+  }
+
+  if (locationType === '이동' || locationType === '복수·이동' || locationType === 'route') {
     const from = String(body.route_from || '').trim();
     const via = String(body.route_via || '').trim();
     const to = String(body.route_to || '').trim();
@@ -325,10 +346,14 @@ router.post('/api/event-insurance/estimate', upload.fields([
     const event_category = req.body.event_category ? String(req.body.event_category).trim() : null;
     const venue_type = req.body.venue_type ? String(req.body.venue_type).trim() : null;
     const location_type = req.body.location_type ? String(req.body.location_type).trim() : null;
-    const route_from = req.body.route_from ? String(req.body.route_from).trim() : null;
-    const route_via = req.body.route_via ? String(req.body.route_via).trim() : null;
-    const route_to = req.body.route_to ? String(req.body.route_to).trim() : null;
-    const move_note = req.body.move_note ? String(req.body.move_note).trim() : null;
+    const isMoveType = location_type === '이동';
+    const isMultiPlaceType = location_type === '복수';
+    const route_from = isMoveType && req.body.route_from ? String(req.body.route_from).trim() : null;
+    const route_via = isMoveType && req.body.route_via ? String(req.body.route_via).trim() : null;
+    const route_to = isMoveType && req.body.route_to ? String(req.body.route_to).trim() : null;
+    const move_note = isMoveType && req.body.move_note ? String(req.body.move_note).trim() : null;
+    const placesArr = isMultiPlaceType ? parsePlaces(req.body.places) : [];
+    const places = placesArr.length > 0 ? JSON.stringify(placesArr) : null;
     const event_location = resolveEventLocation(req.body);
     const has_performer = parseYuMu(req.body.has_performer, '무');
     const risk_detail = normalizeRiskDetail(req.body.risk_detail);
@@ -404,7 +429,7 @@ router.post('/api/event-insurance/estimate', upload.fields([
       `INSERT INTO event_contracts (
         contract_number, insurance_type, insurance_company, event_name,
         event_form_type, event_category, event_location, venue_type, location_type,
-        route_from, route_via, route_to, move_note,
+        places, route_from, route_via, route_to, move_note,
         participants, has_performer, start_date, end_date,
         sports_event, water_hazard, drone, fireworks,
         amusement_facilities, other, moving_parade, risk_detail,
@@ -413,7 +438,7 @@ router.post('/api/event-insurance/estimate', upload.fields([
         deductible_per_accident, budget_type, budget_amount, marketing_consent,
         premium, business_registration_file, event_outline_file, amusement_photos,
         member_id, affiliate, device, access_path, status, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         contract_number,
         '행사주최자배상책임보험',
@@ -424,6 +449,7 @@ router.post('/api/event-insurance/estimate', upload.fields([
         event_location,
         venue_type,
         location_type,
+        places,
         route_from,
         route_via,
         route_to,
