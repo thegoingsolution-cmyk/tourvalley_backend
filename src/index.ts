@@ -21,6 +21,7 @@ import mileageRoutes from './routes/mileage';
 import eventInsuranceRoutes from './routes/event-insurance';
 import estimateRoutes from './routes/estimate';
 import kakaoAddressRoutes from './routes/kakaoAddress';
+import eventDocumentSupplementRoutes from './routes/eventDocumentSupplement';
 
 // 데이터베이스 연결 테스트
 import { pingDatabase, testConnection } from './config/database';
@@ -77,6 +78,7 @@ app.use('/', mileageRoutes);
 app.use('/', eventInsuranceRoutes);
 app.use('/', estimateRoutes);
 app.use('/', kakaoAddressRoutes);
+app.use('/api/event-document-supplement', eventDocumentSupplementRoutes);
 
 // 헬스 체크 라우트 (DB 연결 포함)
 app.get('/api/health', async (_req: Request, res: Response) => {
