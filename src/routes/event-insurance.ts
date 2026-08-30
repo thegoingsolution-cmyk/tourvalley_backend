@@ -154,6 +154,27 @@ function formatMedicalExpense(value: string | undefined): string | null {
   return `${numValue}만`;
 }
 
+/** 동일 사업자번호에 저장된 법인성격 상속 */
+async function lookupEventOrgTypeByBiz(connection: any, businessNumber: unknown): Promise<string | null> {
+  const biz = String(businessNumber || '').replace(/[^0-9]/g, '');
+  if (biz.length < 5) return null;
+  try {
+    const [rows] = await connection.execute(
+      `SELECT org_type FROM event_contractors
+       WHERE REPLACE(REPLACE(IFNULL(business_number,''), '-', ''), ' ', '') = ?
+         AND org_type IS NOT NULL AND TRIM(org_type) <> ''
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      [biz],
+    );
+    const t = String(rows?.[0]?.org_type || '').trim();
+    return t || null;
+  } catch (e) {
+    console.warn('lookupEventOrgTypeByBiz failed:', e);
+    return null;
+  }
+}
+
 // 자기부담금 숫자를 어드민 형식으로 변환
 // 예: 10 -> "10만", 50 -> "50만", 100 -> "100만"
 function formatDeductible(value: string | undefined): string | null {
@@ -490,15 +511,17 @@ router.post('/api/event-insurance/estimate', upload.fields([
 
     const contract_id = contractResult.insertId;
 
-    // 2. 계약자 정보 저장
+    // 2. 계약자 정보 저장 (동일 사업자번호 법인성격 상속)
+    const inheritedOrgType = await lookupEventOrgTypeByBiz(connection, req.body.registration_no);
     await connection.execute<any>(
       `INSERT INTO event_contractors (
-        contract_id, contractor, business_number, contact_person, department, email, mobile_phone, phone
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        contract_id, contractor, business_number, org_type, contact_person, department, email, mobile_phone, phone
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         contract_id,
         req.body.contractor_name,
         req.body.registration_no,
+        inheritedOrgType,
         req.body.incharge,
         department,
         req.body.email,
