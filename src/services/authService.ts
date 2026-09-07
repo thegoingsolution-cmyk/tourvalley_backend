@@ -274,7 +274,7 @@ export const findMemberUsername = async (params: FindIdParams): Promise<{ succes
          AND name = ?
          AND birth_date = ?
          AND gender = ?
-         AND mobile_phone = ?`,
+         AND REPLACE(mobile_phone, '-', '') = ?`,
       [params.name, params.birthDate, gender, cleanPhone]
     );
     if (rows.length === 0) {
@@ -291,15 +291,21 @@ export const findMemberUsername = async (params: FindIdParams): Promise<{ succes
     return { success: false, message: '회사명과 사업자번호를 입력해주세요.' };
   }
 
+  const cleanBusinessNumber = normalizePhone(params.businessNumber);
+
   const [rows] = await pool.execute<RowDataPacket[]>(
     `SELECT m.username, m.status
      FROM members m
      JOIN corporate_members c ON c.member_id = m.id
+     LEFT JOIN corporate_contacts cc ON cc.corporate_member_id = c.id AND cc.is_primary = 1
      WHERE m.member_type = '법인'
-       AND c.company_name = ?
-       AND c.business_number = ?
-       AND m.mobile_phone = ?`,
-    [params.companyName, params.businessNumber, cleanPhone]
+       AND TRIM(c.company_name) = ?
+       AND REPLACE(c.business_number, '-', '') = ?
+       AND (
+         REPLACE(m.mobile_phone, '-', '') = ?
+         OR REPLACE(IFNULL(cc.mobile_phone, ''), '-', '') = ?
+       )`,
+    [params.companyName.trim(), cleanBusinessNumber, cleanPhone, cleanPhone]
   );
 
   if (rows.length === 0) {
@@ -348,7 +354,7 @@ const getMemberForReset = async (
          AND name = ?
          AND birth_date = ?
          AND gender = ?
-         AND mobile_phone = ?`,
+         AND REPLACE(mobile_phone, '-', '') = ?`,
       [params.username, params.name, params.birthDate, gender, cleanPhone]
     );
     return rows.length > 0 ? (rows[0] as { id: number; status: string }) : null;
@@ -358,16 +364,22 @@ const getMemberForReset = async (
     return null;
   }
 
+  const cleanBusinessNumber = normalizePhone(params.businessNumber);
+
   const [rows] = await pool.execute<RowDataPacket[]>(
     `SELECT m.id, m.status
      FROM members m
      JOIN corporate_members c ON c.member_id = m.id
+     LEFT JOIN corporate_contacts cc ON cc.corporate_member_id = c.id AND cc.is_primary = 1
      WHERE m.member_type = '법인'
        AND m.username = ?
-       AND c.company_name = ?
-       AND c.business_number = ?
-       AND m.mobile_phone = ?`,
-    [params.username, params.companyName, params.businessNumber, cleanPhone]
+       AND TRIM(c.company_name) = ?
+       AND REPLACE(c.business_number, '-', '') = ?
+       AND (
+         REPLACE(m.mobile_phone, '-', '') = ?
+         OR REPLACE(IFNULL(cc.mobile_phone, ''), '-', '') = ?
+       )`,
+    [params.username, params.companyName.trim(), cleanBusinessNumber, cleanPhone, cleanPhone]
   );
 
   return rows.length > 0 ? (rows[0] as { id: number; status: string }) : null;
