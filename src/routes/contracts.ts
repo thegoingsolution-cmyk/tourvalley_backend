@@ -17,6 +17,41 @@ interface VerificationData {
 
 const verificationStore: Map<string, VerificationData> = new Map();
 
+function isYyyyMmDdPrefix(digits: string): boolean {
+  if (digits.length < 8) return false;
+  const year = Number(digits.slice(0, 4));
+  const month = Number(digits.slice(4, 6));
+  const day = Number(digits.slice(6, 8));
+  if (year < 1900 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const birth = new Date(year, month - 1, day);
+  return birth.getFullYear() === year && birth.getMonth() === month - 1 && birth.getDate() === day;
+}
+
+/**
+ * 주민번호에서 생년월일.
+ * 13자리(YYMMDD+뒷7)는 앞 6자리, 15자리(YYYYMMDD+뒷7)는 앞 8자리.
+ * 외국인 남5·여6=1900, 남7·여8=2000.
+ */
+function birthDateFromResidentNumber(residentNumber: string | null | undefined): { yymmdd: string; yyyymmdd: string } {
+  const empty = { yymmdd: '', yyyymmdd: '' };
+  if (!residentNumber) return empty;
+  const digits = String(residentNumber).replace(/\D/g, '');
+  if (digits.length < 6) return empty;
+
+  if (digits.length !== 13 && isYyyyMmDdPrefix(digits)) {
+    const yyyymmdd = digits.slice(0, 8);
+    return { yymmdd: yyyymmdd.slice(2), yyyymmdd };
+  }
+
+  const yy = parseInt(digits.slice(0, 2), 10);
+  const mmdd = digits.slice(2, 6);
+  const yymmdd = digits.slice(0, 6);
+  if (digits.length < 7 || Number.isNaN(yy)) return { yymmdd, yyyymmdd: '' };
+  const genderDigit = parseInt(digits[6], 10);
+  const century = [3, 4, 7, 8].includes(genderDigit) ? 2000 : 1900;
+  return { yymmdd, yyyymmdd: `${century + yy}${mmdd}` };
+}
+
 // 가입/신청 내역 조회
 router.get('/api/contracts/list', async (req: Request, res: Response) => {
   try {
@@ -991,9 +1026,8 @@ router.get('/api/contracts/non-member/:id/participants', async (req: Request, re
 
     // 회원 GET /api/contracts/:id/participants 와 동일한 포맷 (성별·생년월일·보험료)
     const formatBirthDate = (residentNumber: string | null) => {
-      if (!residentNumber) return '';
-      const part = residentNumber.split('-')[0]?.replace(/\D/g, '') ?? '';
-      return part.length >= 8 ? part.slice(0, 8) : part.length >= 6 ? part.slice(0, 6) : '';
+      const parsed = birthDateFromResidentNumber(residentNumber);
+      return parsed.yyyymmdd || parsed.yymmdd;
     };
 
     /** 외국인등록번호(YYMMDD-XXXXXXX) 7번째 자리로 성별 판별: 5,7=남자, 6,8=여자 */
@@ -1137,11 +1171,10 @@ router.get('/api/contracts/:id/participants', async (req: Request, res: Response
 
     const contract = contracts[0];
 
-    // resident_number: "19670323-1******" → 하이픈 앞 8자리(YYYYMMDD) 그대로 반환
+    // resident_number: "19670323-1******" → YYYYMMDD, "050313-8140013" → 20050313
     const formatBirthDate = (residentNumber: string | null) => {
-      if (!residentNumber) return '';
-      const part = residentNumber.split('-')[0]?.replace(/\D/g, '') ?? '';
-      return part.length >= 8 ? part.slice(0, 8) : part.length >= 6 ? part.slice(0, 6) : '';
+      const parsed = birthDateFromResidentNumber(residentNumber);
+      return parsed.yyyymmdd || parsed.yymmdd;
     };
 
     /** 외국인등록번호(YYMMDD-XXXXXXX) 7번째 자리로 성별 판별: 5,7=남자, 6,8=여자 */
@@ -1532,25 +1565,8 @@ router.post('/api/certificate/send-code', async (req: Request, res: Response) =>
       } else {
         // 비회원: contractors 테이블
         contractName = contract.contractor_name || '';
-        // resident_number 형식: 19881212-1****** (YYYYMMDD-G)
         if (contract.contractor_resident_number) {
-          const residentNum = contract.contractor_resident_number.replace(/-/g, '');
-          
-          // 🔍 디버깅
-          console.log('============================================');
-          console.log('📋 [비회원 생년월일 추출]');
-          console.log('  - resident_number(원본):', contract.contractor_resident_number);
-          console.log('  - resident_number(정제):', residentNum);
-          
-          // resident_number 앞 8자리가 YYYYMMDD
-          if (residentNum.length >= 8) {
-            contractBirthDate = residentNum.substring(0, 8); // YYYYMMDD
-            console.log('  - 추출된 생년월일:', contractBirthDate);
-          } else {
-            console.log('  - ⚠️ resident_number 길이 부족:', residentNum.length);
-            contractBirthDate = '';
-          }
-          console.log('============================================');
+          contractBirthDate = birthDateFromResidentNumber(contract.contractor_resident_number).yyyymmdd;
         }
       }
       

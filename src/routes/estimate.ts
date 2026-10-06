@@ -154,6 +154,9 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
       }
     }
 
+    // 인원 수는 화면에서 고른 숫자가 아니라, 실제로 넘어온 피보험자 수로 저장한다.
+    const insuredCount = participants.length;
+
     // 견적 신청번호 생성 (트랜잭션 내에서 안전하게 생성)
     const requestNumber = await generateRequestNumber(connection);
 
@@ -184,7 +187,7 @@ router.post('/api/estimate/submit', async (req: Request, res: Response) => {
         start_hour,
         end_date,
         end_hour,
-        parseInt(tour_num),
+        insuredCount,
         tour_day ? parseInt(tour_day) : null,
         contractor_name,
         contractor_phone,
